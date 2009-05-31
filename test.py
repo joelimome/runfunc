@@ -1,270 +1,406 @@
+#!/usr/bin/env python
+import sys
 import unittest
 import optfunc
 from StringIO import StringIO
 
-class TestOptFunc(unittest.TestCase):
-    def test_three_positional_args(self):
-        
-        has_run = [False]
+class StreamDup(object):
+    def __init__(self, stream):
+        self.stream = stream
+        if isinstance(self.stream, StreamDup):
+            self.stream = self.stream.stream
+        self.dupped = StringIO()
+        self.silent = False
+    def __getattr__(self, name):
+        if callable(getattr(self.stream, name)):
+            def dup(*args, **kwargs):
+                if not self.silent:
+                    getattr(self.stream, name)(*args, **kwargs)
+                getattr(self.dupped, name)(*args, **kwargs)
+            return dup
+        return getattr(self.stream, name)
+    def silence(self):
+        self.silent = True
+    def unsilence(self):
+        self.silent = False
+    def getvalue(self):
+        return self.dupped.getvalue()
+
+class BaseTest(unittest.TestCase):
+    def setUp(self):
+        sys.stdin = StreamDup(sys.stdin)
+        sys.stdout = StreamDup(sys.stdout)
+        sys.stderr = StreamDup(sys.stderr)
+
+class OptfuncProgNameTest(unittest.TestCase):
+    def test_success(self):
+        self.assertEqual(optfunc.progname(), sys.argv[0])
+    
+    def test_fail(self):
+        oldargv = sys.argv
+        sys.argv = []
+        self.assertEqual(optfunc.progname(), 'unknown_program')
+        sys.argv = oldargv
+
+class OptfuncParserTest(BaseTest):
+    def test_required_args(self):
+        "Required arguments are parsed correctly"
+
         def func(one, two, three):
-            has_run[0] = True
+            pass
+
+        parser = optfunc.OptfuncParser(func)
         
-        # Should only have the -h help option
-        parser, required_args = optfunc.func_to_optionparser(func)
         self.assertEqual(len(parser.option_list), 1)
         self.assertEqual(str(parser.option_list[0]), '-h/--help')
+        self.assertEqual(parser.required, ["one", "two", "three"])
         
-        # Should have three required args
-        self.assertEqual(required_args, ['one', 'two', 'three'])
-        
-        # Running it with the wrong number of arguments should cause an error
-        for argv in (
-            ['one'],
-            ['one', 'two'],
-            ['one', 'two', 'three', 'four'],
-        ):
-            e = StringIO()
-            optfunc.run(func, argv, stderr=e)
-            self.assert_('Required 3 arguments' in e.getvalue(), e.getvalue())
-            self.assertEqual(has_run[0], False)
-        
-        # Running it with the right number of arguments should be fine
-        e = StringIO()
-        optfunc.run(func, ['one', 'two', 'three'], stderr=e)
-        self.assertEqual(e.getvalue(), '')
-        self.assertEqual(has_run[0], True)
-    
-    def test_one_arg_one_option(self):
-        
-        has_run = [False]
-        def func(one, option=''):
-            has_run[0] = (one, option)
-        
-        # Should have -o option as well as -h option
-        parser, required_args = optfunc.func_to_optionparser(func)
-        self.assertEqual(len(parser.option_list), 2)
-        strs = [str(o) for o in parser.option_list]
-        self.assert_('-h/--help' in strs)
-        self.assert_('-o/--option' in strs)
-        
-        # Should have one required arg
-        self.assertEqual(required_args, ['one'])
-        
-        # Should execute
-        self.assert_(not has_run[0])
-        optfunc.run(func, ['the-required', '-o', 'the-option'])
-        self.assert_(has_run[0])
-        self.assertEqual(has_run[0], ('the-required', 'the-option'))
-        
-        # Option should be optional
-        has_run[0] = False
-        optfunc.run(func, ['required2'])
-        self.assert_(has_run[0])
-        self.assertEqual(has_run[0], ('required2', ''))
-    
-    def test_options_are_correctly_named(self):
-        def func1(one, option='', verbose=False):
+    def test_kwargs(self):
+        "Keyword args are made into options"
+
+        def func(one="foo", two=True):
             pass
+
+        parser = optfunc.OptfuncParser(func)
+
+        self.assertEqual(len(parser.option_list), 3)
+        self.assertEqual(len(parser.required), 0)
+        self.assertEqual(str(parser.option_list[0]), '-h/--help')
         
-        parser, required_args = optfunc.func_to_optionparser(func1)
-        strs = [str(o) for o in parser.option_list]
-        self.assertEqual(strs, ['-h/--help', '-o/--option', '-v/--verbose'])
-    
-    def test_option_with_hyphens(self):
-        def func2(option_with_hyphens=True):
-            pass
+        self.assertEqual(str(parser.option_list[1]), '-o/--one')
+        self.assertEqual(parser.option_list[1].default, 'foo')
+        self.assertEqual(parser.option_list[1].action, 'store')
+
+        self.assertEqual(str(parser.option_list[2]), '-t/--two')
+        self.assertEqual(parser.option_list[2].default, True)
+        self.assertEqual(parser.option_list[2].action, 'store_true')
+
+    def test_short_names(self):
+        "Repeated short names are resolved"
+
+        def check_parsed(expect, opts):
+            for opt in opts:
+                self.assertEqual(str(opt) in expect, True)
+                expect.remove(str(opt))
+            self.assertEqual(len(expect), 0)            
         
-        parser, required_args = optfunc.func_to_optionparser(func2)
-        strs = [str(o) for o in parser.option_list]
-        self.assertEqual(strs, ['-h/--help', '-o/--option-with-hyphens'])
-    
-    def test_options_with_same_inital_use_next_letter(self):
         def func1(one, version='', verbose=False):
             pass
         
-        parser, required_args = optfunc.func_to_optionparser(func1)
-        strs = [str(o) for o in parser.option_list]
-        self.assertEqual(strs, ['-h/--help', '-v/--version', '-e/--verbose'])
-
+        parser = optfunc.OptfuncParser(func1)
+        expect = ['-h/--help', '-v/--version', '-e/--verbose']
+        check_parsed(expect, parser.option_list)
+            
         def func2(one, host=''):
             pass
         
-        parser, required_args = optfunc.func_to_optionparser(func2)
-        strs = [str(o) for o in parser.option_list]
-        self.assertEqual(strs, ['-h/--help', '-o/--host'])
-    
-    def test_short_option_can_be_named_explicitly(self):
-        def func1(one, option='', q_verbose=False):
-            pass
-        
-        parser, required_args = optfunc.func_to_optionparser(func1)
-        strs = [str(o) for o in parser.option_list]
-        self.assertEqual(strs, ['-h/--help', '-o/--option', '-q/--verbose'])
+        parser = optfunc.OptfuncParser(func2)
+        expect = ['-h/--help', '-o/--host']
+        check_parsed(expect, parser.option_list)
 
-        e = StringIO()
-        optfunc.run(func1, ['one', '-q'], stderr=e)
-        self.assertEqual(e.getvalue().strip(), '')
-    
-    def test_notstrict(self):
-        "@notstrict tells optfunc to tolerate missing required arguments"
-        def strict_func(one):
+    def test_custom_short_name(self):
+        "Custom short names"
+        
+        def func(b_far=3):
             pass
         
-        e = StringIO()
-        optfunc.run(strict_func, [], stderr=e)
-        self.assertEqual(e.getvalue().strip(), 'Required 1 arguments, got 0')
+        parser = optfunc.OptfuncParser(func)
+        
+        self.assertEqual(len(parser.option_list), 2)
+        self.assertEqual(str(parser.option_list[1]), '-b/--far')
+
+    def test_optfunc_replaces_underscores(self):
+        "Replace underscores with hyphens"
+        
+        def func(something_here=2):
+            pass
+        
+        parser = optfunc.OptfuncParser(func)
+        self.assertEqual(len(parser.option_list), 2)
+        self.assertEqual(str(parser.option_list[1]), '-s/--something-here')
+
+    def test_optfunc_parses_methods(self):
+        "Object methods are handled correctly"
+        
+        class Foo(object):
+            def method(self, foo, baz="bing!"):
+                pass
+        
+        parser = optfunc.OptfuncParser(Foo().method)
+        self.assertEqual(len(parser.option_list), 2)
+        self.assertEqual(str(parser.option_list[1]), '-b/--baz')
+        self.assertEqual(parser.required, ["foo"])
+
+    def test_optfunc_parses_lambda(self):
+        "Lambdas are handled correctly"
+        
+        # Not at all sure on a use case, but OptfuncParse handles
+        # it with zero extra code.
+
+        parser = optfunc.OptfuncParser(lambda x: x.doh())
+        self.assertEqual(len(parser.option_list), 1)
+        self.assertEqual(parser.required, ["x"])
+    
+    def test_optfunc_parses_callable_objects(self):
+        "Callable objects aren't directly kosher"
+        
+        class Foo(object):
+            def __call__(self, args, data=4):
+                pass
+        
+        # OptfuncParser uses inspect.getargspec which doesn't do
+        # magic to check for a __call__ method. Although, callable
+        # objects *are* handled by the run methods.
+        
+        self.assertRaises(TypeError, optfunc.OptfuncParser, Foo())
+
+    def test_arghelp(self):
+        "@arghelp('foo', 'help about foo') sets the help output"
+
+        @optfunc.arghelp('foo', 'help about foo')
+        def func(foo=False):
+            pass
+
+        parser = optfunc.OptfuncParser(func)
+        self.assertEqual(parser.option_list[1].help, 'help about foo')
+
+
+class OptfuncRunTest(BaseTest):
+    def test_args(self):
+        "Check running the basics"
+
+        def func(a, b=2, d=False):
+            if d: return int(b)*3 + int(a)
+            return -1
+
+        self.assertEqual(optfunc.run(func, ["1", "-b", "3", "-d"]), 10)
+        self.assertEqual(optfunc.run(func, ["1"]), -1)
+        self.assertEqual(optfunc.run(func, ["1", "-d"]), 7)
+    
+    def test_missing_required(self):
+        "Throws an error for missing arguments"
+
+        def func(a, b):
+            pass
+        
+        self.assertRaises(RuntimeError, optfunc.run, func, [], catch=False)
+        self.assertRaises(RuntimeError, optfunc.run, func, ['2'], catch=False)
+    
+    def test_too_many_args(self):
+        "Throws an error for too many arguments"
+        
+        def func(a):
+            pass
+        
+        test = lambda: optfunc.run(func, ['2', '3'], catch=False)
+        self.assertRaises(RuntimeError, test)
+    def test_custom_short_name(self):
+        "Custom short names"
+
+        def func(b_far=3):
+            return b_far
+
+        self.assertEqual(optfunc.run(func, ['-b', 10]), 10)
+
+    def test_notstrict(self):
+        "@notstrict fills missing args with None"
         
         @optfunc.notstrict
-        def notstrict_func(one):
-            pass
+        def func(a, b):
+            return [a, b]
         
-        e = StringIO()
-        optfunc.run(notstrict_func, [], stderr=e)
-        self.assertEqual(e.getvalue().strip(), '')
-    
-    def test_arghelp(self):
-        "@arghelp('foo', 'help about foo') sets help text for parameters"
-        @optfunc.arghelp('foo', 'help about foo')
-        def foo(foo = False):
-            pass
-        
-        parser, required_args = optfunc.func_to_optionparser(foo)
-        opt = parser.option_list[1]
-        self.assertEqual(str(opt), '-f/--foo')
-        self.assertEqual(opt.help, 'help about foo')
-    
-    def test_multiple_invalid_subcommand(self):
-        "With multiple subcommands, invalid first arg should raise an error"
-        def one(arg):
-            pass
-        def two(arg):
-            pass
-        def three(arg):
-            pass
-        
-        # Invalid first argument should raise an error
-        e = StringIO()
-        optfunc.run([one, two], ['three'], stderr=e)
-        self.assertEqual(
-            e.getvalue().strip(), "Unknown command: try 'one' or 'two'"
-        )
-        e = StringIO()
-        optfunc.run([one, two, three], ['four'], stderr=e)
-        self.assertEqual(
-            e.getvalue().strip(),
-            "Unknown command: try 'one', 'two' or 'three'"
-        )
-        
-        # No argument at all should raise an error
-        e = StringIO()
-        optfunc.run([one, two, three], [], stderr=e)
-        self.assertEqual(
-            e.getvalue().strip(),
-            "Unknown command: try 'one', 'two' or 'three'"
-        )
-    
-    def test_multiple_valid_subcommand_invalid_argument(self):
-        "Subcommands with invalid arguments should report as such"
-        def one(arg):
-            executed.append(('one', arg))
-        
-        def two(arg):
-            executed.append(('two', arg))
+        self.assertEqual(optfunc.run(func, ['foo']), ['foo', None])
 
-        e = StringIO()
-        executed = []
-        optfunc.run([one, two], ['one'], stderr=e)
-        self.assertEqual(
-            e.getvalue().strip(), 'one: Required 1 arguments, got 0'
-        )
-    
-    def test_multiple_valid_subcommand_valid_argument(self):
-        "Subcommands with valid arguments should execute as expected"
-        def one(arg):
-            executed.append(('one', arg))
+    def test_notstrict_too_many(self):
+        "Even with @notstrict too many args is an error"
         
-        def two(arg):
-            executed.append(('two', arg))
+        @optfunc.notstrict
+        def func(a):
+            pass
+    
+        test = lambda: optfunc.run(func, ['foo', 'bar'], catch=False)
+        self.assertRaises(RuntimeError, test)
 
-        e = StringIO()
-        executed = []
-        optfunc.run([one, two], ['two', 'arg!'], stderr=e)
-        self.assertEqual(e.getvalue().strip(), '')
-        self.assertEqual(executed, [('two', 'arg!')])
-
+class OptfuncClassTest(BaseTest):
     def test_run_class(self):
-        class Class:
+        "Running a class executes it's init method."
+
+        class InitClass:
             def __init__(self, one, option=''):
-                self.has_run = [(one, option)]
+                self.vals = (one, option)
+
+        test = lambda: optfunc.run(InitClass, ['f', '-o', 'z'])
+        self.assertEqual(test().vals, ('f', 'z'))
+
+    def test_no_init_is_error(self):
+        "No __init__ method on a class throws an error."
         
+        # I can't figure out how this would be useful. Calling it an
+        # an error until someone shows me different.
+
         class NoInitClass:
             pass
+        
+        self.assertRaises(TypeError, optfunc.run, NoInitClass, [], catch=False)
 
-        # Should execute
-        e = StringIO()
-        c = optfunc.run(Class, ['the-required', '-o', 'the-option'], stderr=e)
-        self.assertEqual(e.getvalue().strip(), '')
-        self.assert_(c.has_run[0])
-        self.assertEqual(c.has_run[0], ('the-required', 'the-option'))
-        
-        # Option should be optional
-        c = None
-        e = StringIO()
-        c = optfunc.run(Class, ['required2'], stderr=e)
-        self.assertEqual(e.getvalue().strip(), '')
-        self.assert_(c.has_run[0])
-        self.assertEqual(c.has_run[0], ('required2', ''))
+    def test_runs_callable_instance(self):
+        "Instances of callable classes are ok."
 
-        # Classes without init should work too
-        c = None
-        e = StringIO()
-        c = optfunc.run(NoInitClass, [], stderr=e)
-        self.assert_(c)
-        self.assertEqual(e.getvalue().strip(), '')
+        class CallableClass(object):
+            def __init__(self):
+                pass
+            def __call__(self, arg, opt=2):
+                return arg + str(opt)
+
+        self.assertEqual(optfunc.run(CallableClass(), ['f', '-o', '3']), 'f3')
+
+    def test_ridiculous_error(self):
+        "Ridiculous error to force checked condition"
+        class HidesCallable(object):
+            def __init__(self):
+                self.found = 0
+            def __call__(self):
+                pass
+            def __getattribute__(self, name):
+                if name == '__call__' and self.found > 1:
+                    raise AttributeError("I am hiding")
+                self.found += 1
+                return super(HidesCallable, self).__getattribute__(self, name)
+        
+        test = lambda: optfunc.run(HidesCallable(), [], catch=False)
+        self.assertRaises(TypeError, test)
+
+class OptfuncCommandsTest(BaseTest):
+    def test_basics(self):
+        "Executes subcommands successfully"
     
-    def test_stdin_special_argument(self):
-        consumed = []
-        def func(stdin):
-            consumed.append(stdin.read())
+        def one(arg):
+            return "One " + str(arg)
+        def two(arg, some='stuff'):
+            return "Two " + str(arg) + ' ' + some
+        def three(arg):
+            return "Three " + str(arg)
+            
+        test = lambda x: optfunc.run([one, two, three], x)
+        self.assertEqual(test(['two', '2']), 'Two 2 stuff')
+        self.assertEqual(test(['three', '5']), 'Three 5')
         
-        class FakeStdin(object):
-            def read(self):
-                return "hello"
+    def test_no_args(self):
+        "No args prints the command list"
         
-        optfunc.run(func, stdin=FakeStdin())
-        self.assertEqual(consumed, ['hello'])
+        def one(arg):
+            pass
+        def two(arg):
+            pass
+
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence()
+        self.assertEqual(optfunc.run([one, two], catch=False), 0)
+        sys.stderr.unsilence()
+        self.assertNotEqual(sys.stderr.getvalue(), "")
+
+    def test_invalid_command(self):
+        "Invalid command is an error and prints help"
+        
+        def one(arg):
+            pass
+        def two(arg):
+            pass
+        
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence() # Quiet output
+        self.assertEqual(optfunc.run([one, two], ['three']), -1)
+        sys.stderr.unsilence()
+        self.assertNotEqual(sys.stderr.getvalue(), "")
     
-    def test_stdout_special_argument(self):
-        def upper(stdin, stdout):
-            stdout.write(stdin.read().upper())
+    def test_help_prints_help(self):
+        "Default help command prints a command list"
         
-        class FakeStdin(object):
-            def read(self):
-                return "hello"
+        def one(arg):
+            pass
+        def two(arg):
+            pass
         
-        class FakeStdout(object):
-            written = ''
-            def write(self, w):
-                self.written = w
-        
-        stdout = FakeStdout()
-        self.assertEqual(stdout.written, '')
-        optfunc.run(upper, stdin=FakeStdin(), stdout=stdout)
-        self.assertEqual(stdout.written, 'HELLO')
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence()
+        self.assertEqual(optfunc.run([one, two], ['help']), 0)
+        sys.stderr.unsilence()
+        self.assertNotEqual(sys.stderr.getvalue(), "")
     
-    def test_stderr_special_argument(self):
-        def upper(stderr):
-            stderr.write('an error')
+    def test_cmd_desc(self):
+        "@cmddesc describes a command in list output"
         
-        class FakeStderr(object):
-            written = ''
-            def write(self, w):
-                self.written = w
+        @optfunc.cmddesc("Captain commando!")
+        def one(arg):
+            pass
         
-        stderr = FakeStderr()
-        self.assertEqual(stderr.written, '')
-        optfunc.run(upper, stderr=stderr)
-        self.assertEqual(stderr.written, 'an error')
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence()
+        self.assertEqual(optfunc.run([one], ['help']), 0)
+        sys.stderr.unsilence()
+        self.assertNotEqual(sys.stderr.getvalue(), "")
+        self.assertEqual("commando!" in sys.stderr.getvalue(), True)
+    
+    def test_help_with_args(self):
+        "Help with commands prints some help"
+        
+        def one(arg):
+            "Some stuff"
+            pass
+        def two(arg):
+            pass
+        
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence()
+        self.assertEqual(optfunc.run([one, two], ['help', 'one', 'three']), 0)
+        sys.stderr.unsilence()
+        self.assertNotEqual(sys.stderr.getvalue(), "")
+    
+    def test_help_as_command(self):
+        "If a command is named 'help' it is run"
+        
+        def one(arg):
+            pass
+        def help(arg):
+            return arg + ' bar'
+        
+        self.assertEqual(sys.stderr.getvalue(), "")
+        sys.stderr.silence()
+        self.assertEqual(optfunc.run([one, help], ['help', 'foo']), 'foo bar')
+        sys.stderr.unsilence()
+        self.assertEqual(sys.stderr.getvalue(), "")
+
+class OptfuncPipesTest(BaseTest):
+    def test_stdin(self):
+        "stdin, stdout, stderr as argument names gets passed sys.* streams"
+        
+        def func(stdin, stdout, stderr):
+            self.assertEqual(stdin, sys.stdin)
+            self.assertEqual(stdout, sys.stdout)
+            self.assertEqual(stderr, sys.stderr)
+            return "awesome!"
+        
+        self.assertEqual(optfunc.run(func, []), 'awesome!')
+
+class OptfuncMainTest(BaseTest):
+    def test_run_func(self):
+        "optfunc.main runs passed function"
+
+        def stuff():
+            return -2
+
+        self.assertEqual(optfunc.main(stuff, []), -2)
+
+    # I have no idea how to force the condition in optfunc.main
+    # into thinking it's a frame down from main.
+    #
+    # def test_as_runner(self):
+    #     "optfunc.main runs the function"
+    # 
+    #     def func():
+    #         return 34
+    # 
+    #     self.assertEqual(optfunc.main(func, []), 34)
 
 if __name__ == '__main__':
     unittest.main()

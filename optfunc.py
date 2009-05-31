@@ -1,154 +1,176 @@
-from optparse import OptionParser, make_option
-import sys, inspect, re
+import inspect
+import optparse as op
+import os
+import re
+import sys
+import types
 
-single_char_prefix_re = re.compile('^[a-zA-Z0-9]_')
+def progname():
+    if not len(sys.argv):
+        return 'unknown_program'
+    return sys.argv[0]
 
-class ErrorCollectingOptionParser(OptionParser):
-    def __init__(self, *args, **kwargs):
-        self._errors = []
-        self._custom_names = {}
+class OptfuncParser(op.OptionParser):
+    def __init__(self, func, *args, **kwargs):
         # can't use super() because OptionParser is an old style class
-        OptionParser.__init__(self, *args, **kwargs)
-    
-    def parse_args(self, argv):
-        options, args = OptionParser.parse_args(self, argv)
-        for k,v in options.__dict__.iteritems():
-            if k in self._custom_names:
-                options.__dict__[self._custom_names[k]] = v
-                del options.__dict__[k]
-        return options, args
+        op.OptionParser.__init__(self, *args, usage=func.__doc__, **kwargs)
+        self._opt_names = {}
+        self._errors = []
 
-    def error(self, msg):
-        self._errors.append(msg)
+        self.strict = not hasattr(func, "optfunc_notstrict")
+        self.helpdict = getattr(func, 'optfunc_arghelp', {})
 
-def func_to_optionparser(func):
-    args, varargs, varkw, defaultvals = inspect.getargspec(func)
-    defaultvals = defaultvals or ()
-    options = dict(zip(args[-len(defaultvals):], defaultvals))
-    argstart = 0
-    if func.__name__ == '__init__':
-        argstart = 1
-    if defaultvals:
-        required_args = args[argstart:-len(defaultvals)]
-    else:
-        required_args = args[argstart:]
-    
-    # Build the OptionParser:
-    opt = ErrorCollectingOptionParser(usage = func.__doc__)
-    
-    helpdict = getattr(func, 'optfunc_arghelp', {})
-    
-    # Add the options, automatically detecting their -short and --long names
-    shortnames = set(['h'])
-    for funcname, example in options.items():
-        # They either explicitly set the short with x_blah...
-        name = funcname
-        if single_char_prefix_re.match(name):
-            short = name[0]
-            name = name[2:]
-            opt._custom_names[name] = funcname
-        # Or we pick the first letter from the name not already in use:
-        else:
-            for short in name:
-                if short not in shortnames:
-                    break
+        args, varargs, varkw, defaults = inspect.getargspec(func)
+        defaults = defaults or ()
+        options = zip(args[-len(defaults):], defaults)
+
+        numargs = len(args)
+        if len(defaults) > 0:
+            numargs -= len(defaults)
         
+        # Account for the self argument
+        if isinstance(func, (types.BuiltinMethodType, types.MethodType)):
+            self.required = args[1:numargs]
+        else:
+            self.required = args[:numargs]
+
+        # Build option descriptions for keyword arguments.
+        shortnames = set(['h'])
+        for optname, default in options:
+            opt = self.make_option(optname, default, shortnames)
+            self.add_option(opt)
+
+    def parse(self, argv):
+        opts, args = op.OptionParser.parse_args(self, argv)
+        for k,v in opts.__dict__.iteritems():
+            if k in self._opt_names:
+                opts.__dict__[self._opt_names[k]] = v
+                del opts.__dict__[k]
+
+        for pipe in ('stdin', 'stderr', 'stdout'):
+            if pipe in self.required:
+                self.required.remove(pipe)
+                setattr(opts, pipe, getattr(sys, pipe))
+
+        if len(args) > len(self.required):
+            extra = args[len(self.required):]
+            raise RuntimeError("Extra arguments: %s" % ', '.join(extra))
+
+        if len(args) < len(self.required) and self.strict:
+            missing = self.required[len(args):]
+            raise RuntimeError("Missing arguments: %s" % ', '.join(missing))
+
+        args += [None] * (len(self.required) - len(args))
+        for idx, name in enumerate(self.required):
+            setattr(opts, name, args[idx])
+
+        return opts.__dict__
+
+    def make_option(self, name, default, shortnames):
+        (short, name) = self.short_name(name, shortnames)
         shortnames.add(short)
-        short_name = '-%s' % short
-        long_name = '--%s' % name.replace('_', '-')
-        if example in (True, False, bool):
+
+        short = '-%s' % short
+        long = '--%s' % name.replace('_', '-')
+        if default in (True, False, bool):
             action = 'store_true'
         else:
             action = 'store'
-        opt.add_option(make_option(
-            short_name, long_name, action=action, dest=name, default=example,
-            help = helpdict.get(funcname, '')
-        ))
-    
-    return opt, required_args
+       
+        return op.make_option(short, long, action=action, dest=name,
+            default=default, help=self.helpdict.get(name, ''))
 
-def resolve_args(func, argv):
-    parser, required_args = func_to_optionparser(func)
-    options, args = parser.parse_args(argv)
-    
-    # Special case for stdin/stdout/stderr
-    for pipe in ('stdin', 'stdout', 'stderr'):
-        if pipe in required_args:
-            required_args.remove(pipe)
-            setattr(options, 'optfunc_use_%s' % pipe, True)
-    
-    # Do we have correct number af required args?
-    if len(required_args) != len(args):
-        if not hasattr(func, 'optfunc_notstrict'):
-            parser._errors.append('Required %d arguments, got %d' % (
-                len(required_args), len(args)
-            ))
-    
-    # Ensure there are enough arguments even if some are missing
-    args += [None] * (len(required_args) - len(args))
-    for i, name in enumerate(required_args):
-        setattr(options, name, args[i])
-    
-    return options.__dict__, parser._errors
+    def short_name(self, arg, used):
+        # Allow specification of a short option name by naming
+        # function arguments with a 'x_' prefix where 'x' becomes
+        # the short option.
+        if re.match('^[a-zA-Z0-9]_', arg):
+            self._opt_names[arg[2:]] = arg
+            return (arg[0], arg[2:])
+        for ch in arg:
+            if ch in used:
+                continue
+            return (ch, arg)
 
-def run(
-        func, argv=None, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr
-    ):
-    argv = argv or sys.argv[1:]
-    include_func_name_in_errors = False
-    
-    # Handle multiple functions
-    if isinstance(func, (tuple, list)):
-        funcs = dict([
-            (fn.__name__, fn) for fn in func
-        ])
-        try:
-            func_name = argv.pop(0)
-        except IndexError:
-            func_name = None
-        if func_name not in funcs:
-            names = ["'%s'" % fn.__name__ for fn in func]
-            s = ', '.join(names[:-1])
-            if len(names) > 1:
-                s += ' or %s' % names[-1]
-            stderr.write("Unknown command: try %s\n" % s)
-            return
-        func = funcs[func_name]
-        include_func_name_in_errors = True
+def run(func, argv=None, catch=True):
+    try:
+        if not isinstance(func, (tuple, list)):
+            return run_single(func, argv)
+        return run_many(func, argv)
+    except Exception, inst:
+        if not catch:
+            raise
+        sys.stderr.write("%s\n" % str(inst))
+        sys.stderr.write("Try '%s -h'\n" % progname())
+        return -1
 
-    if inspect.isfunction(func):
-        resolved, errors = resolve_args(func, argv)
-    elif inspect.isclass(func):
-        if hasattr(func, '__init__'):
-            resolved, errors = resolve_args(func.__init__, argv)
-        else:
-            resolved, errors = {}, []
-    else:
-        raise TypeError('arg is not a Python function or class')
+def run_single(func, argv):
+    desc = func
+    if isinstance(func, types.ClassType):
+        if not hasattr(func, "__init__"):
+            raise TypeError("%r has no '__init__' method." % func)
+        desc = func.__init__
+    if not callable(func):
+        raise TypeError("%r is not callable." % func)
     
-    # Special case for stdin/stdout/stderr
-    for pipe in ('stdin', 'stdout', 'stderr'):
-        if resolved.pop('optfunc_use_%s' % pipe, False):
-            resolved[pipe] = locals()[pipe]
-    
-    if not errors:
-        try:
-            return func(**resolved)
-        except Exception, e:
-            if include_func_name_in_errors:
-                stderr.write('%s: ' % func.__name__)
-            stderr.write(str(e) + '\n')
-    else:
-        if include_func_name_in_errors:
-            stderr.write('%s: ' % func.__name__)
-        stderr.write("%s\n" % '\n'.join(errors))
+    functypes = (
+        types.BuiltinFunctionType, types.FunctionType,
+        types.BuiltinMethodType, types.MethodType
+    )
+    if not isinstance(desc, functypes):
+        if not hasattr(func, '__call__'):
+            raise TypeError('Unable to figure out how to call object.')
+        desc = func.__call__
 
-def main(*args, **kwargs):
-    prev_frame = inspect.stack()[-1][0]
-    mod = inspect.getmodule(prev_frame)
-    if mod is not None and mod.__name__ == '__main__':
-        run(*args, **kwargs)
-    return args[0] # So it won't break anything if used as a decorator
+    parser = OptfuncParser(desc)
+    opts = parser.parse(argv)
+    return func(**opts)
+
+def run_many(funcs, argv):
+    funcs = dict([(fn.__name__, fn) for fn in funcs])
+
+    if not argv or len(argv) < 1:
+        subcommand_help(funcs)
+        return 0
+    
+    fname = argv.pop(0)
+
+    if fname not in funcs and fname != "help":
+        sys.stderr.write("Unknown command: '%s'\n" % fname)
+        sys.stderr.write("Type '%s help' for usage'\n" % progname())
+        return -1
+    
+    if fname not in funcs and fname == "help":
+        if len(argv) > 1:
+            for arg in argv:
+                if arg in funcs:
+                    parser = OptfuncParser(funcs[arg])
+                    parser.print_help(file=sys.stderr)
+                else:
+                    sys.stderr.write("Unknown command: '%s'" % arg)
+            return 0
+        subcommand_help(funcs)
+        return 0
+
+    return run_single(funcs[fname], argv)
+
+def subcommand_help(funcs):
+    doc = map(lambda x: x.strip(), ("""
+        usage: %(prog)s <subcommand> [options] [args]
+        Type '%(prog)s help <subcommand>' for help on a specific subcommand.
+    """ % {"prog": progname()}).strip().split('\n'))
+    
+    doc.extend(['', 'Available subcommands:'])
+    
+    maxlen = len(max(funcs, key=lambda x: len(x)))
+    fmt = "    %%%ds" % maxlen
+    for func in funcs:
+        desc = fmt % func
+        if hasattr(funcs[func], "optfunc_desc"):
+            desc += " - " + funcs[func].optfunc_desc
+        doc.append(desc)
+    doc.append('')
+    sys.stderr.write(os.linesep.join(doc))
 
 # Decorators
 def notstrict(fn):
@@ -162,3 +184,18 @@ def arghelp(name, help):
         setattr(fn, 'optfunc_arghelp', d)
         return fn
     return inner
+
+def cmddesc(desc):
+    def inner(fn):
+        fn.optfunc_desc = desc
+        return fn
+    return inner
+
+# Convenience runner
+def main(*args, **kwargs):
+    prev_frame = inspect.stack()[-1][0]
+    mod = inspect.getmodule(prev_frame)
+    if mod is not None and mod.__name__ == '__main__':
+        return run(*args, **kwargs)
+    return args[0] # So it won't break anything if used as a decorator
+
