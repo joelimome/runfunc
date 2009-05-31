@@ -57,12 +57,13 @@ How arguments work
 ------------------
 
 Non-keyword arguments are treated as required arguments - optfunc.run will 
-throw an error if they number of arguments provided on the command line 
+throw an error if the number of arguments provided on the command line 
 doesn't match the number expected by the function (unless @notstrict is used, 
 see below).
 
-Keyword arguments with defaults are treated as options. At the moment, only 
-string and boolean arguments are supported. Other types are planned.
+Keyword arguments with defaults are treated as options. Option types are set to
+match the type of the default value. This can be controlled using the @option
+decorator described later.
 
 Consider the following:
 
@@ -134,6 +135,7 @@ to select a subcommand based on the first argument:
     def two(arg):
         print "Two: %s" % arg
     
+	@optfunc.cmddesc("The third command")
     def three(arg):
         print "Three: %s" % arg
     
@@ -142,25 +144,34 @@ to select a subcommand based on the first argument:
 
 Usage looks like this:
 
-    $ ./subcommands_demo.py    
-    Unknown command: try 'one', 'two' or 'three'
-    $ ./subcommands_demo.py one
-    one: Required 1 arguments, got 0
-    $ ./subcommands_demo.py two arg
-    Two: arg
+    $ ./subcommands.py
+	usage: ./subcommands.py <subcommand> [options] [args]
+	Type './subcommands.py help <subcommand>' for help on a specific subcommand.
 
-This approach is limited in that help can be provided for an individual option 
-but not for the application as a whole. If anyone knows how to get optparse to
-handle the subcommand pattern please let me know.
+	Available subcommands:
+	    three - The third command is three times as awesome!
+	      two
+	      one
+	$ ./subcommands.py help one
+	Usage: subcommands.py one arg
+
+	Options:
+	  -h, --help  show this help message and exit
+
+    $ ./subcommands.py one
+    Missing arguments: arg
+	Try './subcommands.py help'
+	$ ./subcommands.py two arg
+    Two: arg
 
 Decorators
 ----------
 
-optfunc also supports two decorators for stuff I couldn't work out how to 
+optfunc also supports a couple decorators for stuff I couldn't work out how to 
 shoehorn in to a regular function definition. geocode.py shows them in action:
 
     @optfunc.notstrict
-    @optfunc.arghelp('list_geocoders', 'list available geocoders and exit')
+    @optfunc.option('list_geocoders', help='list available geocoders and exit')
     def geocode(s, api_key='', geocoder='google', list_geocoders=False):
         # ...
 
@@ -168,15 +179,19 @@ shoehorn in to a regular function definition. geocode.py shows them in action:
 arguments is missing" - in the above example we use this because we still want
 the list_geocoders argument to work even if a string has not been provided.
 
-@arghelp('arg-name', 'help text') allows you to provide help on individual 
-arguments, which will then be displayed when --help is called.
+@option('arg-name', **kwargs) allows you to override any keyword argument to
+optparse.Option's constructor. A list of common arguments:
+
+    * help - Displayed when `./program -h` is called
+    * metavar - The variable name to display when `./program -h` is called
+    * type - Type of parameter to cast to.
+    * choices - A list of choices for the parameter
 
 TODO
 ----
 
-* Support for different argument types (int, string, filehandle, choices)
-* Special handling for 'stdin' as an argument name
+* Support for opening files or using one of the std* pipes
 * Proper unix error semantics (sys.exit(1) etc)
 * Allow the function to be a generator, print iterations to stdout
 * Support for *args (I don't think **kwargs makes sense for optfunc)
-* Subcommands need to interact with --help better
+* Errors when running subcommands need to report the subcommand help
