@@ -18,7 +18,7 @@ class OptfuncParser(op.OptionParser):
         self._errors = []
 
         self.strict = not hasattr(func, "optfunc_notstrict")
-        self.helpdict = getattr(func, 'optfunc_arghelp', {})
+        self.optdict = getattr(func, 'optfunc_optdict', {})
 
         args, varargs, varkw, defaults = inspect.getargspec(func)
         defaults = defaults or ()
@@ -76,9 +76,15 @@ class OptfuncParser(op.OptionParser):
             action = 'store_true'
         else:
             action = 'store'
-       
-        return op.make_option(short, long, action=action, dest=name,
-            default=default, help=self.helpdict.get(name, ''))
+
+        kwargs = {
+            "action": action,
+            "dest": name,
+            "default": default,
+            "help": ""
+        }
+        kwargs.update(self.optdict.get(name, {}))
+        return op.make_option(short, long, **kwargs)
 
     def short_name(self, arg, used):
         # Allow specification of a short option name by naming
@@ -93,15 +99,19 @@ class OptfuncParser(op.OptionParser):
             return (ch, arg)
 
 def run(func, argv=None, catch=True):
+    if argv is None:
+        argv = sys.argv[1:]
+    helpmesg = "Try '%s -h'\n"
     try:
         if not isinstance(func, (tuple, list)):
             return run_single(func, argv)
+        helpmesg = "Try '%s help'\n"
         return run_many(func, argv)
     except Exception, inst:
         if not catch:
             raise
         sys.stderr.write("%s\n" % str(inst))
-        sys.stderr.write("Try '%s -h'\n" % progname())
+        sys.stderr.write(helpmesg % progname())
         return -1
 
 def run_single(func, argv):
@@ -139,17 +149,18 @@ def run_many(funcs, argv):
         sys.stderr.write("Unknown command: '%s'\n" % fname)
         sys.stderr.write("Type '%s help' for usage'\n" % progname())
         return -1
-    
+
     if fname not in funcs and fname == "help":
-        if len(argv) > 1:
-            for arg in argv:
-                if arg in funcs:
-                    parser = OptfuncParser(funcs[arg])
-                    parser.print_help(file=sys.stderr)
-                else:
-                    sys.stderr.write("Unknown command: '%s'" % arg)
+        if len(argv) < 1:
+            subcommand_help(funcs)
             return 0
-        subcommand_help(funcs)
+        for arg in argv:
+            if arg in funcs:
+                parser = OptfuncParser(funcs[arg])
+                parser.print_help(file=sys.stderr)
+                sys.stderr.write('\n')
+            else:
+                sys.stderr.write("Unknown command: '%s'\n" % arg)
         return 0
 
     return run_single(funcs[fname], argv)
@@ -177,19 +188,22 @@ def notstrict(fn):
     fn.optfunc_notstrict = True
     return fn
 
-def arghelp(name, help):
-    def inner(fn):
-        d = getattr(fn, 'optfunc_arghelp', {})
-        d[name] = help
-        setattr(fn, 'optfunc_arghelp', d)
+class option(object):
+    def __init__(self, name, **kwargs):
+        self.name = name
+        self.kwargs = kwargs
+    def __call__(self, fn):
+        curr = getattr(fn, 'optfunc_optdict', {})
+        curr[self.name] = self.kwargs
+        setattr(fn, 'optfunc_optdict', curr)
         return fn
-    return inner
 
-def cmddesc(desc):
-    def inner(fn):
-        fn.optfunc_desc = desc
+class cmddesc(object):
+    def __init__(self, desc):
+        self.desc = desc
+    def __call__(self, fn):
+        fn.optfunc_desc = self.desc
         return fn
-    return inner
 
 # Convenience runner
 def main(*args, **kwargs):

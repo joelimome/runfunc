@@ -154,16 +154,22 @@ class OptfuncParserTest(BaseTest):
         
         self.assertRaises(TypeError, optfunc.OptfuncParser, Foo())
 
-    def test_arghelp(self):
-        "@arghelp('foo', 'help about foo') sets the help output"
+    def test_option_decorator(self):
+        "@option('foo', **kwargs) affects the Option instance"
 
-        @optfunc.arghelp('foo', 'help about foo')
+        @optfunc.option('foo', help='help about foo')
         def func(foo=False):
             pass
 
         parser = optfunc.OptfuncParser(func)
         self.assertEqual(parser.option_list[1].help, 'help about foo')
 
+        @optfunc.option('foo', type='int')
+        def func(foo=2):
+            return foo
+        
+        parser = optfunc.OptfuncParser(func)
+        self.assertEqual(parser.option_list[1].type, 'int')
 
 class OptfuncRunTest(BaseTest):
     def test_args(self):
@@ -194,6 +200,7 @@ class OptfuncRunTest(BaseTest):
         
         test = lambda: optfunc.run(func, ['2', '3'], catch=False)
         self.assertRaises(RuntimeError, test)
+
     def test_custom_short_name(self):
         "Custom short names"
 
@@ -295,7 +302,7 @@ class OptfuncCommandsTest(BaseTest):
 
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one, two], catch=False), 0)
+        self.assertEqual(optfunc.run([one, two], [], catch=False), 0)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
 
