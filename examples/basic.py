@@ -1,12 +1,21 @@
 #!/usr/bin/env python
-import optfunc
+import optfork as opt
 
-def upper(filename, verbose = False):
-    "Usage: %prog <file> [--verbose] - output file content in uppercase"
-    s = open(filename).read()
+@opt.valid(int, "value")
+def upper(value, verbose=False):
+    """
+    basic.py - Basic example for optfork usage
+    
+    usage: %(prog)s INT [--verbose]
+        
+        INT       - Multiply an integer by two
+        --verbose - Be verbose about it.
+    """
     if verbose:
-        print "Processing %s bytes..." % len(s)
-    print s.upper()
+        print "INPUT: %d" % value
+    newval = value * 2
+    if verbose:
+        print "%d * 2 = %d" % (value, newval)
+    print newval
 
-if __name__ == '__main__':
-    optfunc.run(upper)
+opt.main(upper)

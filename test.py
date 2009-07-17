@@ -40,7 +40,7 @@ class BaseTest(unittest.TestCase):
 
 class OptforkProgNameTest(unittest.TestCase):
     def test_success(self):
-        self.assertEqual(optfork.progname(), sys.argv[0])
+        self.assertEqual(optfork.progname(), os.path.split(sys.argv[0])[-1])
     
     def test_fail(self):
         oldargv = sys.argv
@@ -178,57 +178,15 @@ class OptforkParserTest(BaseTest):
         parser = optfork.OptforkParser(func)
         self.assertEqual(parser.option_list[1].type, 'int')
 
-    def test_arg_validator(self):
-        "@valid checks required arguments"
-        
-        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
-        def func(foo):
-            return foo
-        
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(parser.validators["foo"][0], int)
-        self.assertEqual(optfork.run(func, ["1"]), 1)
-        self.assertRaises(SystemExit, optfork.run, func, ["wheee"])
-    
-    def test_opt_validator(self):
-        "@valid checks option arguments"
-
-        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
-        def func(foo=None):
-            return foo
-        
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(parser.validators["foo"][0], int)
-        self.assertEqual(optfork.run(func, []), None)
-        self.assertEqual(optfork.run(func, ["-f", "10"]), 10)
-        self.assertRaises(SystemExit, optfork.run, func, ["zippy"])
-
-    def test_multi_validations(self):
-        "@valid checks all named parameters."
-        
-        @optfork.valid(int, "foo", "bar")
-        def func(foo, bar=None):
-            return foo, bar
-
-        valid = [
-            (["-b", "4", "1"], (1, 4)),
-            (["2"], (2, None))
-        ]
-        for pair in valid:
-            self.assertEqual(optfork.run(func, pair[0]), pair[1])
-
-        invalid = [
-            ["-b", "c", "1"],
-            ["z"],
-            ["-b", "5", "t"],
-            ["1", "-b", "foo"]
-        ]
-        for args in invalid:
-            sys.stderr.silence()
-            self.assertRaises(SystemExit, optfork.run, func, args)
-            sys.stderr.unsilence()
-
 class OptforkRunTest(BaseTest):
+    def test_bad_args(self):
+        "Check that an invalid arguments object is bad."
+        
+        def func(a):
+            pass
+        
+        self.assertRaises(TypeError, optfork.run, func, "zooom!")
+
     def test_args(self):
         "Check running the basics"
 
@@ -284,6 +242,226 @@ class OptforkRunTest(BaseTest):
     
         test = lambda: optfork.run(func, ['foo', 'bar'])
         self.assertRaises(SystemExit, test)
+
+
+class OptforkBasicValidatorTest(BaseTest):
+    def test_arg_validator(self):
+        "@valid checks required arguments"
+
+        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
+        def func(foo):
+            return foo
+
+        parser = optfork.OptforkParser(func)
+        self.assertEqual(parser.validators["foo"][0].im_self.func, int)
+        self.assertEqual(optfork.run(func, ["1"]), 1)
+        self.assertRaises(SystemExit, optfork.run, func, ["wheee"])
+
+    def test_opt_validator(self):
+        "@valid checks option arguments"
+
+        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
+        def func(foo=None):
+            return foo
+
+        parser = optfork.OptforkParser(func)
+        self.assertEqual("foo" in parser.validators, True)
+        self.assertEqual(optfork.run(func, []), None)
+        self.assertEqual(optfork.run(func, ["-f", "10"]), 10)
+        self.assertRaises(SystemExit, optfork.run, func, ["zippy"])
+
+    def test_multi_validations(self):
+        "@valid checks all named parameters."
+
+        @optfork.valid(int, "foo", "bar")
+        def func(foo, bar=None):
+            return foo, bar
+
+        valid = [
+            (["-b", "4", "1"], (1, 4)),
+            (["2"], (2, None))
+        ]
+        for pair in valid:
+            self.assertEqual(optfork.run(func, pair[0]), pair[1])
+
+        invalid = [
+            ["-b", "c", "1"],
+            ["z"],
+            ["-b", "5", "t"],
+            ["1", "-b", "foo"]
+        ]
+        for args in invalid:
+            sys.stderr.silence()
+            self.assertRaises(SystemExit, optfork.run, func, args)
+            sys.stderr.unsilence()
+
+    def test_auto_validate(self):
+        "Validators are picked up from the default value's type."
+        
+        def func(bar=1, foo="three", baz=2.0):
+            return bar, foo, baz
+        
+        parser = optfork.OptforkParser(func)
+        for name in "bar foo baz".split():
+            self.assertEqual(name in parser.validators, True)
+        args = ["-b", "2", "--foo=four", "-a", "3.1415"]
+        expect = (2, "four", 3.1415)
+        self.assertEqual(optfork.run(func, args), expect)
+    
+    def test_list_append(self):
+        "List default values make command line arguments accumulate"
+        
+        def func(foo=[]):
+            return foo
+        
+        args = ["-f", "0", "--foo=3", "--fo", "baz"]
+        self.assertEqual(optfork.run(func, args), ["0", "3", "baz"])
+
+        # monkey punch error condition
+        @optfork.option("foo", default=1)
+        def func(foo=[]):
+            return foo
+
+        self.assertEqual(optfork.run(func, args), [1, "0", "3", "baz"])
+
+class OptforkChoicesTest(BaseTest):
+    def test_basic(self):
+        "@choices limits to the available strings"
+        
+        @optfork.choices(["a", "b"], "bar")
+        def func(bar):
+            return bar
+        
+        self.assertEqual(optfork.run(func, ["a"]), "a")
+        self.assertEqual(optfork.run(func, ["b"]), "b")
+        self.assertRaises(SystemExit, optfork.run, func, ["c"])
+
+    def test_auto_validate(self):
+        "@choices with input validation works"
+        
+        @optfork.choices([1, 2], "baz", validator=int)
+        def func(baz):
+            return baz
+        
+        self.assertEqual(optfork.run(func, ["1"]), 1)
+        self.assertRaises(SystemExit, optfork.run, func, ["4"])
+        self.assertRaises(SystemExit, optfork.run, func, ["c"])
+
+class OptforkRegexpTest(BaseTest):
+    def test_basic(self):
+        "@regexp limits to matching strings"
+        
+        @optfork.regexp(r"biz|baz", "baz")
+        def func(baz):
+            return "nibbly"
+        
+        self.assertEqual(optfork.run(func, ["biz"]), "nibbly")
+        self.assertEqual(optfork.run(func, ["baz"]), "nibbly")
+        # Its a call to match() so only the prefix needs to match.
+        self.assertEqual(optfork.run(func, ["bazzingle"]), "nibbly")
+        
+        self.assertRaises(SystemExit, optfork.run, func, ["0"])
+
+class OptforkStreamTest(BaseTest):
+    def setUp(self):
+        self.path = os.path.dirname(__file__)
+
+    def test_file(self):
+        "@stream will detect file names"
+        
+        @optfork.stream(optfork.FILE, "stream")
+        def func(stream):
+            return stream
+        
+        self.assertEqual(optfork.run(func, [__file__]), __file__)
+        self.assertRaises(SystemExit, optfork.run, func, ["/a/dir/path/"])
+
+    def test_dir(self):
+        "@stream will detect directory names"
+        
+        @optfork.stream(optfork.DIR, "stream")
+        def func(stream):
+            return stream
+        
+        self.assertEqual(optfork.run(func, ["/a/dir/path/"]), "/a/dir/path/")
+        self.assertRaises(SystemExit, optfork.run, func, [__file__])
+
+    def test_exists(self):
+        "@stream will detect existing paths"
+        
+        @optfork.stream(optfork.EXISTS, "stream")
+        def func(stream):
+            return stream
+        
+        self.assertEqual(optfork.run(func, [__file__]), __file__)
+        self.assertEqual(optfork.run(func, [self.path]), self.path)
+        self.assertRaises(SystemExit, optfork.run, func, ["/not/a/path"])
+
+    def test_parent(self):
+        "@stream will detect path parents."
+        
+        @optfork.stream(optfork.EXISTS, "stream")
+        def func(stream):
+            return stream
+        
+        self.assertEqual(optfork.run(func, [__file__]), __file__)
+        self.assertEqual(optfork.run(func, [self.path]), self.path)
+        newpath = os.path.join(self.path, "foo", "bar", "baz")
+        self.assertRaises(SystemExit, optfork.run, func, [newpath])
+
+    def test_open_r(self):
+        "@stream will open a file for reading"
+        
+        @optfork.stream(optfork.FILE, "stream", mode="r")
+        def func(stream):
+            return stream.mode
+            
+        self.assertEqual(optfork.run(func, [__file__]), "r")
+        self.assertRaises(SystemExit, optfork.run, func, [self.path])
+        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/nowhere"])
+
+    def test_open_w(self):
+        "@stream will open a file for writing"
+        
+        @optfork.stream(optfork.PARENT, "stream", mode="w+")
+        def func(stream):
+            ret = stream.tell(), stream.mode
+            stream.write("foo")
+            stream.close()
+            return ret
+        
+        tmpfile = os.path.join(self.path, "writer-test.txt")
+        self.assertEqual(optfork.run(func, [tmpfile]), (0, "w+"))
+        self.assertEqual(optfork.run(func, [tmpfile]), (0, "w+"))
+        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/none"])
+        os.remove(tmpfile)
+
+    def test_open_wplusb(self):
+        "@stream will open a file for reading and writing"
+        
+        @optfork.stream(optfork.PARENT, "stream", mode="w+b")
+        def func(stream):
+            stream.write("foo")
+            stream.seek(0)
+            stream.read(2)
+            return stream.tell(), stream.mode
+        
+        tmpfile = os.path.join(self.path, "reader-writer-test.txt")
+        self.assertEqual(optfork.run(func, [tmpfile]), (2, "w+b"))
+        self.assertEqual(optfork.run(func, [tmpfile]), (2, "w+b"))
+        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/none"])
+        os.remove(tmpfile)
+
+    def test_stdin(self):
+        "stdin, stdout, stderr as argument names gets passed sys.* streams"
+
+        def func(stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
+            self.assertEqual(stdin, sys.stdin)
+            self.assertEqual(stdout, sys.stdout)
+            self.assertEqual(stderr, sys.stderr)
+            return "awesome!"
+
+        self.assertEqual(optfork.run(func, []), 'awesome!')
 
 class OptforkClassTest(BaseTest):
     def test_run_class(self):
@@ -433,18 +611,6 @@ class OptforkCommandsTest(BaseTest):
         self.assertEqual(optfork.run([one, help], ['help', 'foo']), 'foo bar')
         sys.stderr.unsilence()
         self.assertEqual(sys.stderr.getvalue(), "")
-
-class OptforkPipesTest(BaseTest):
-    def test_stdin(self):
-        "stdin, stdout, stderr as argument names gets passed sys.* streams"
-        
-        def func(stdin, stdout, stderr):
-            self.assertEqual(stdin, sys.stdin)
-            self.assertEqual(stdout, sys.stdout)
-            self.assertEqual(stderr, sys.stderr)
-            return "awesome!"
-        
-        self.assertEqual(optfork.run(func, []), 'awesome!')
 
 class OptforkMainTest(BaseTest):
     def test_run_func(self):

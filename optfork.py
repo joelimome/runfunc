@@ -3,15 +3,13 @@ import optparse as op
 import os
 import re
 import sys
+import textwrap
 import types
 
 FILE   = 1
 DIR    = 2
 EXISTS = 4
 PARENT = 8
-READ   = 16
-WRITE  = 32
-RDWR   = 48
 
 EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b")
 IP_ADDR = re.compile(
@@ -25,7 +23,7 @@ IP_ADDR = re.compile(
 def progname():
     if not len(sys.argv):
         return 'unknown_program'
-    return sys.argv[0]
+    return os.path.split(sys.argv[0])[-1]
 
 class OptforkParser(op.OptionParser):
         
@@ -38,10 +36,10 @@ class OptforkParser(op.OptionParser):
     
     def __init__(self, func, *args, **kwargs):
         # can't use super() because OptionParser is an old style class
-        op.OptionParser.__init__(self, *args, usage=func.__doc__, **kwargs)
-        self._opt_names = {}
-        self._errors = []
+        op.OptionParser.__init__(self, *args, **kwargs)
+        self.opt_names = {}
 
+        self.help = func.__doc__
         self.strict = not hasattr(func, "optfork_notstrict")
         self.optdict = getattr(func, 'optfork_optdict', {})
         self.validators = getattr(func, 'optfork_validators', {})
@@ -66,17 +64,15 @@ class OptforkParser(op.OptionParser):
             opt = self.make_option(optname, default, shortnames)
             self.add_option(opt)
 
+    def print_help(self):
+        print textwrap.dedent(self.help).lstrip() % {"prog": progname()}
+
     def parse(self, argv):
         opts, args = op.OptionParser.parse_args(self, argv)
         for k,v in list(opts.__dict__.items()):
-            if k in self._opt_names:
-                opts.__dict__[self._opt_names[k]] = v
+            if k in self.opt_names:
+                opts.__dict__[self.opt_names[k]] = v
                 del opts.__dict__[k]
-
-        for pipe in ('stdin', 'stderr', 'stdout'):
-            if pipe in self.required:
-                self.required.remove(pipe)
-                setattr(opts, pipe, getattr(sys, pipe))
 
         if len(args) < len(self.required) and self.strict:
             missing = self.required[len(args):]
@@ -97,14 +93,14 @@ class OptforkParser(op.OptionParser):
         return opts.__dict__
 
     def validate(self, option, optstr, value, parser):
-        optname = self._opt_names.get(option.dest, option.dest)
+        optname = self.opt_names.get(option.dest, option.dest)
         value = self._validate(optname, value)
         setattr(parser.values, option.dest, value)
     
     def append(self, option, optstr, value, parser):
-        optname = self._opt_names.get(option.dest, option.dest)
+        optname = self.opt_names.get(option.dest, option.dest)
         value = self._validate(optname, value)
-        curr = getattr(parser.opts, optname, [])
+        curr = getattr(parser.values, optname, [])
         if not isinstance(curr, list):
             curr = [curr]
         curr.append(value)
@@ -133,9 +129,9 @@ class OptforkParser(op.OptionParser):
             vtype = getattr(default, "__class__", None)
             if vtype in self.TYPE_VALIDATORS:
                 self.validators[name] = self.TYPE_VALIDATORS[vtype]
-            elif isinstance(default, list):
+            elif isinstance(default, list) and len(default) > 0:
                 vtype = getattr(default[0], "__class__", None)
-                if vtupe in self.TYPE_VALIDATORS:
+                if vtype in self.TYPE_VALIDATORS:
                     self.validators[name] = self.TYPE_VALIDATORS[vtype]
 
         short = '-%s' % short
@@ -174,17 +170,17 @@ class OptforkParser(op.OptionParser):
         # function arguments with a 'x_' prefix where 'x' becomes
         # the short option.
         if re.match('^[a-zA-Z0-9]_', arg):
-            self._opt_names[arg[2:]] = arg
+            self.opt_names[arg[2:]] = arg
             return (arg[0], arg[2:])
         for ch in arg:
             if ch in used:
                 continue
             return (ch, arg)
 
-def run(func, argv=None):
+def run(func, argv=None, help=None):
     if argv is None:
         argv = sys.argv[1:]
-    if not isinstance(argv, (list, tuple)):
+    if not isinstance(argv, list):
         raise TypeError("Invalid argument list: %r" % argv)
     helpmesg = "Try '%s -h'\n"
     try:
@@ -232,7 +228,7 @@ def run_many(funcs, argv):
 
     if fname not in funcs and fname != "help":
         sys.stderr.write("Unknown command: '%s'\n" % fname)
-        sys.stderr.write("Type '%s help' for usage'\n" % progname())
+        sys.stderr.write("Try '%s help'\n" % progname())
         return -1
 
     if fname not in funcs and fname == "help":
@@ -242,7 +238,7 @@ def run_many(funcs, argv):
         for arg in argv:
             if arg in funcs:
                 parser = OptforkParser(funcs[arg])
-                parser.print_help(file=sys.stderr)
+                parser.print_help()
                 sys.stderr.write('\n')
             else:
                 sys.stderr.write("Unknown command: '%s'\n" % arg)
@@ -295,20 +291,24 @@ class valid(object):
         self.func = func
         self.help = kwargs.get("help", None)
         self.names = args
+
     def __call__(self, func):
         curr = getattr(func, 'optfork_validators', {})
         for name in self.names:
-            curr[name] = (self.func, self.help)
+            curr[name] = (self.valid, self.help)
         setattr(func, 'optfork_validators', curr)
         return func
+
+    def valid(self, value):
+        return self.func(value)
 
 class choices(valid):
     def __init__(self, opts, *args, **kwargs):
         valid.__init__(self, self, *args, **kwargs)
         self.opts = opts
         self.validator = kwargs.get("validator", None)
-    
-    def __call__(self, value):
+
+    def valid(self, value):
         if self.validator:
             value = self.validator(value)
         if value in self.opts:
@@ -322,7 +322,7 @@ class regexp(valid):
         kwargs.pop("help", None)
         self.pattern = re.compile(pattern, **kwargs)
 
-    def __call__(self, value):
+    def valid(self, value):
         if not self.pattern.match(value):
             raise ValueError()
         return value
@@ -331,8 +331,9 @@ class stream(valid):
     def __init__(self, flags, *args, **kwargs):
         valid.__init__(self, self, *args, **kwargs)
         self.flags = flags
+        self.mode = kwargs.get("mode", None)
 
-    def __call__(self, value):
+    def valid(self, value):
         head, tail = os.path.split(value)
         if self.flags & FILE and not tail:
             raise op.OptionValueError("File '%s' does not exist." % value)
@@ -344,13 +345,10 @@ class stream(valid):
         if self.flags & PARENT and not os.path.exists(head):
             mesg = "Parent directory '%s' does not exist." % head
             raise op.OptionValueError(mesg)
+        if not self.mode:
+            return value
         try:
-            if self.flags & RDWR == RDWR:
-                return open(value, "wr")
-            if self.flags & READ:
-                return open(value, "r")
-            if self.flags & WRITE:
-                return open(value, "w")
+            return open(value, self.mode)
         except IOError, inst:
             mesg = "Failed to open file '%s' : %s" % (value, inst.strerror)
             raise op.OptionValueError(mesg)
@@ -363,10 +361,10 @@ def main(*args, **kwargs):
         if len(args) > 0:
             return run(*args, **kwargs)
         # Pull in subcommands
-        args = []
+        comms = []
         for name, obj in inspect.getmembers(mod):
             if callable(obj) and hasattr(obj, "optfork_desc"):
-                args.append(obj)
-        return run(*args, **kwargs)
+                comms.append(obj)
+        return run(comms, **kwargs)
     return args[0] # So it won't break anything if used as a decorator
 
