@@ -1,8 +1,14 @@
 #!/usr/bin/env python
+import optparse as op
+import os
 import sys
 import unittest
-import optfunc
 from StringIO import StringIO
+
+os.putenv("OPTFUNC_RAISE", "TRUE")
+
+import optfork
+
 
 class StreamDup(object):
     def __init__(self, stream):
@@ -32,24 +38,24 @@ class BaseTest(unittest.TestCase):
         sys.stdout = StreamDup(sys.stdout)
         sys.stderr = StreamDup(sys.stderr)
 
-class OptfuncProgNameTest(unittest.TestCase):
+class OptforkProgNameTest(unittest.TestCase):
     def test_success(self):
-        self.assertEqual(optfunc.progname(), sys.argv[0])
+        self.assertEqual(optfork.progname(), sys.argv[0])
     
     def test_fail(self):
         oldargv = sys.argv
         sys.argv = []
-        self.assertEqual(optfunc.progname(), 'unknown_program')
+        self.assertEqual(optfork.progname(), 'unknown_program')
         sys.argv = oldargv
 
-class OptfuncParserTest(BaseTest):
+class OptforkParserTest(BaseTest):
     def test_required_args(self):
         "Required arguments are parsed correctly"
 
         def func(one, two, three):
             pass
 
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
         
         self.assertEqual(len(parser.option_list), 1)
         self.assertEqual(str(parser.option_list[0]), '-h/--help')
@@ -61,7 +67,7 @@ class OptfuncParserTest(BaseTest):
         def func(one="foo", two=True):
             pass
 
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
 
         self.assertEqual(len(parser.option_list), 3)
         self.assertEqual(len(parser.required), 0)
@@ -69,7 +75,8 @@ class OptfuncParserTest(BaseTest):
         
         self.assertEqual(str(parser.option_list[1]), '-o/--one')
         self.assertEqual(parser.option_list[1].default, 'foo')
-        self.assertEqual(parser.option_list[1].action, 'store')
+        self.assertEqual(parser.option_list[1].action, 'callback')
+        self.assertEqual(parser.option_list[1].callback, parser.validate)
 
         self.assertEqual(str(parser.option_list[2]), '-t/--two')
         self.assertEqual(parser.option_list[2].default, True)
@@ -87,14 +94,14 @@ class OptfuncParserTest(BaseTest):
         def func1(one, version='', verbose=False):
             pass
         
-        parser = optfunc.OptfuncParser(func1)
+        parser = optfork.OptforkParser(func1)
         expect = ['-h/--help', '-v/--version', '-e/--verbose']
         check_parsed(expect, parser.option_list)
             
         def func2(one, host=''):
             pass
         
-        parser = optfunc.OptfuncParser(func2)
+        parser = optfork.OptforkParser(func2)
         expect = ['-h/--help', '-o/--host']
         check_parsed(expect, parser.option_list)
 
@@ -104,74 +111,124 @@ class OptfuncParserTest(BaseTest):
         def func(b_far=3):
             pass
         
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
         
         self.assertEqual(len(parser.option_list), 2)
         self.assertEqual(str(parser.option_list[1]), '-b/--far')
 
-    def test_optfunc_replaces_underscores(self):
+    def test_optfork_replaces_underscores(self):
         "Replace underscores with hyphens"
         
         def func(something_here=2):
             pass
         
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
         self.assertEqual(len(parser.option_list), 2)
         self.assertEqual(str(parser.option_list[1]), '-s/--something-here')
 
-    def test_optfunc_parses_methods(self):
+    def test_optfork_parses_methods(self):
         "Object methods are handled correctly"
         
         class Foo(object):
             def method(self, foo, baz="bing!"):
                 pass
         
-        parser = optfunc.OptfuncParser(Foo().method)
+        parser = optfork.OptforkParser(Foo().method)
         self.assertEqual(len(parser.option_list), 2)
         self.assertEqual(str(parser.option_list[1]), '-b/--baz')
         self.assertEqual(parser.required, ["foo"])
 
-    def test_optfunc_parses_lambda(self):
+    def test_optfork_parses_lambda(self):
         "Lambdas are handled correctly"
         
-        # Not at all sure on a use case, but OptfuncParse handles
+        # Not at all sure on a use case, but OptforkParse handles
         # it with zero extra code.
 
-        parser = optfunc.OptfuncParser(lambda x: x.doh())
+        parser = optfork.OptforkParser(lambda x: x.doh())
         self.assertEqual(len(parser.option_list), 1)
         self.assertEqual(parser.required, ["x"])
     
-    def test_optfunc_parses_callable_objects(self):
+    def test_optfork_parses_callable_objects(self):
         "Callable objects aren't directly kosher"
         
         class Foo(object):
             def __call__(self, args, data=4):
                 pass
         
-        # OptfuncParser uses inspect.getargspec which doesn't do
+        # OptforkParser uses inspect.getargspec which doesn't do
         # magic to check for a __call__ method. Although, callable
         # objects *are* handled by the run methods.
         
-        self.assertRaises(TypeError, optfunc.OptfuncParser, Foo())
+        self.assertRaises(TypeError, optfork.OptforkParser, Foo())
 
     def test_option_decorator(self):
         "@option('foo', **kwargs) affects the Option instance"
 
-        @optfunc.option('foo', help='help about foo')
+        @optfork.option('foo', help='help about foo')
         def func(foo=False):
             pass
 
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
         self.assertEqual(parser.option_list[1].help, 'help about foo')
 
-        @optfunc.option('foo', type='int')
+        @optfork.option('foo', type='int')
         def func(foo=2):
             return foo
         
-        parser = optfunc.OptfuncParser(func)
+        parser = optfork.OptforkParser(func)
         self.assertEqual(parser.option_list[1].type, 'int')
 
-class OptfuncRunTest(BaseTest):
+    def test_arg_validator(self):
+        "@valid checks required arguments"
+        
+        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
+        def func(foo):
+            return foo
+        
+        parser = optfork.OptforkParser(func)
+        self.assertEqual(parser.validators["foo"][0], int)
+        self.assertEqual(optfork.run(func, ["1"]), 1)
+        self.assertRaises(SystemExit, optfork.run, func, ["wheee"])
+    
+    def test_opt_validator(self):
+        "@valid checks option arguments"
+
+        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
+        def func(foo=None):
+            return foo
+        
+        parser = optfork.OptforkParser(func)
+        self.assertEqual(parser.validators["foo"][0], int)
+        self.assertEqual(optfork.run(func, []), None)
+        self.assertEqual(optfork.run(func, ["-f", "10"]), 10)
+        self.assertRaises(SystemExit, optfork.run, func, ["zippy"])
+
+    def test_multi_validations(self):
+        "@valid checks all named parameters."
+        
+        @optfork.valid(int, "foo", "bar")
+        def func(foo, bar=None):
+            return foo, bar
+
+        valid = [
+            (["-b", "4", "1"], (1, 4)),
+            (["2"], (2, None))
+        ]
+        for pair in valid:
+            self.assertEqual(optfork.run(func, pair[0]), pair[1])
+
+        invalid = [
+            ["-b", "c", "1"],
+            ["z"],
+            ["-b", "5", "t"],
+            ["1", "-b", "foo"]
+        ]
+        for args in invalid:
+            sys.stderr.silence()
+            self.assertRaises(SystemExit, optfork.run, func, args)
+            sys.stderr.unsilence()
+
+class OptforkRunTest(BaseTest):
     def test_args(self):
         "Check running the basics"
 
@@ -179,9 +236,9 @@ class OptfuncRunTest(BaseTest):
             if d: return int(b)*3 + int(a)
             return -1
 
-        self.assertEqual(optfunc.run(func, ["1", "-b", "3", "-d"]), 10)
-        self.assertEqual(optfunc.run(func, ["1"]), -1)
-        self.assertEqual(optfunc.run(func, ["1", "-d"]), 7)
+        self.assertEqual(optfork.run(func, ["1", "-b", "3", "-d"]), 10)
+        self.assertEqual(optfork.run(func, ["1"]), -1)
+        self.assertEqual(optfork.run(func, ["1", "-d"]), 7)
     
     def test_missing_required(self):
         "Throws an error for missing arguments"
@@ -189,8 +246,8 @@ class OptfuncRunTest(BaseTest):
         def func(a, b):
             pass
         
-        self.assertRaises(RuntimeError, optfunc.run, func, [], catch=False)
-        self.assertRaises(RuntimeError, optfunc.run, func, ['2'], catch=False)
+        self.assertRaises(SystemExit, optfork.run, func, [])
+        self.assertRaises(SystemExit, optfork.run, func, ['2'])
     
     def test_too_many_args(self):
         "Throws an error for too many arguments"
@@ -198,8 +255,8 @@ class OptfuncRunTest(BaseTest):
         def func(a):
             pass
         
-        test = lambda: optfunc.run(func, ['2', '3'], catch=False)
-        self.assertRaises(RuntimeError, test)
+        test = lambda: optfork.run(func, ['2', '3'])
+        self.assertRaises(SystemExit, test)
 
     def test_custom_short_name(self):
         "Custom short names"
@@ -207,28 +264,28 @@ class OptfuncRunTest(BaseTest):
         def func(b_far=3):
             return b_far
 
-        self.assertEqual(optfunc.run(func, ['-b', 10]), 10)
+        self.assertEqual(optfork.run(func, ['-b', 10]), 10)
 
     def test_notstrict(self):
         "@notstrict fills missing args with None"
         
-        @optfunc.notstrict
+        @optfork.notstrict
         def func(a, b):
             return [a, b]
         
-        self.assertEqual(optfunc.run(func, ['foo']), ['foo', None])
+        self.assertEqual(optfork.run(func, ['foo']), ['foo', None])
 
     def test_notstrict_too_many(self):
         "Even with @notstrict too many args is an error"
         
-        @optfunc.notstrict
+        @optfork.notstrict
         def func(a):
             pass
     
-        test = lambda: optfunc.run(func, ['foo', 'bar'], catch=False)
-        self.assertRaises(RuntimeError, test)
+        test = lambda: optfork.run(func, ['foo', 'bar'])
+        self.assertRaises(SystemExit, test)
 
-class OptfuncClassTest(BaseTest):
+class OptforkClassTest(BaseTest):
     def test_run_class(self):
         "Running a class executes it's init method."
 
@@ -236,7 +293,7 @@ class OptfuncClassTest(BaseTest):
             def __init__(self, one, option=''):
                 self.vals = (one, option)
 
-        test = lambda: optfunc.run(InitClass, ['f', '-o', 'z'])
+        test = lambda: optfork.run(InitClass, ['f', '-o', 'z'])
         self.assertEqual(test().vals, ('f', 'z'))
 
     def test_no_init_is_error(self):
@@ -248,7 +305,7 @@ class OptfuncClassTest(BaseTest):
         class NoInitClass:
             pass
         
-        self.assertRaises(TypeError, optfunc.run, NoInitClass, [], catch=False)
+        self.assertRaises(TypeError, optfork.run, NoInitClass, [])
 
     def test_runs_callable_instance(self):
         "Instances of callable classes are ok."
@@ -259,7 +316,7 @@ class OptfuncClassTest(BaseTest):
             def __call__(self, arg, opt=2):
                 return arg + str(opt)
 
-        self.assertEqual(optfunc.run(CallableClass(), ['f', '-o', '3']), 'f3')
+        self.assertEqual(optfork.run(CallableClass(), ['f', '-o', '3']), 'f3')
 
     def test_ridiculous_error(self):
         "Ridiculous error to force checked condition"
@@ -274,10 +331,10 @@ class OptfuncClassTest(BaseTest):
                 self.found += 1
                 return super(HidesCallable, self).__getattribute__(self, name)
         
-        test = lambda: optfunc.run(HidesCallable(), [], catch=False)
+        test = lambda: optfork.run(HidesCallable(), [])
         self.assertRaises(TypeError, test)
 
-class OptfuncCommandsTest(BaseTest):
+class OptforkCommandsTest(BaseTest):
     def test_basics(self):
         "Executes subcommands successfully"
     
@@ -288,7 +345,7 @@ class OptfuncCommandsTest(BaseTest):
         def three(arg):
             return "Three " + str(arg)
             
-        test = lambda x: optfunc.run([one, two, three], x)
+        test = lambda x: optfork.run([one, two, three], x)
         self.assertEqual(test(['two', '2']), 'Two 2 stuff')
         self.assertEqual(test(['three', '5']), 'Three 5')
         
@@ -302,7 +359,7 @@ class OptfuncCommandsTest(BaseTest):
 
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one, two], [], catch=False), 0)
+        self.assertEqual(optfork.run([one, two], []), 0)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
 
@@ -316,7 +373,7 @@ class OptfuncCommandsTest(BaseTest):
         
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence() # Quiet output
-        self.assertEqual(optfunc.run([one, two], ['three']), -1)
+        self.assertEqual(optfork.run([one, two], ['three']), -1)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
     
@@ -330,20 +387,20 @@ class OptfuncCommandsTest(BaseTest):
         
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one, two], ['help']), 0)
+        self.assertEqual(optfork.run([one, two], ['help']), 0)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
     
-    def test_cmd_desc(self):
-        "@cmddesc describes a command in list output"
+    def test_cmd(self):
+        "@desc describes a command in list output"
         
-        @optfunc.cmddesc("Captain commando!")
+        @optfork.cmd("Captain commando!")
         def one(arg):
             pass
         
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one], ['help']), 0)
+        self.assertEqual(optfork.run([one], ['help']), 0)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
         self.assertEqual("commando!" in sys.stderr.getvalue(), True)
@@ -359,7 +416,7 @@ class OptfuncCommandsTest(BaseTest):
         
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one, two], ['help', 'one', 'three']), 0)
+        self.assertEqual(optfork.run([one, two], ['help', 'one', 'three']), 0)
         sys.stderr.unsilence()
         self.assertNotEqual(sys.stderr.getvalue(), "")
     
@@ -373,11 +430,11 @@ class OptfuncCommandsTest(BaseTest):
         
         self.assertEqual(sys.stderr.getvalue(), "")
         sys.stderr.silence()
-        self.assertEqual(optfunc.run([one, help], ['help', 'foo']), 'foo bar')
+        self.assertEqual(optfork.run([one, help], ['help', 'foo']), 'foo bar')
         sys.stderr.unsilence()
         self.assertEqual(sys.stderr.getvalue(), "")
 
-class OptfuncPipesTest(BaseTest):
+class OptforkPipesTest(BaseTest):
     def test_stdin(self):
         "stdin, stdout, stderr as argument names gets passed sys.* streams"
         
@@ -387,27 +444,27 @@ class OptfuncPipesTest(BaseTest):
             self.assertEqual(stderr, sys.stderr)
             return "awesome!"
         
-        self.assertEqual(optfunc.run(func, []), 'awesome!')
+        self.assertEqual(optfork.run(func, []), 'awesome!')
 
-class OptfuncMainTest(BaseTest):
+class OptforkMainTest(BaseTest):
     def test_run_func(self):
-        "optfunc.main runs passed function"
+        "optfork.main runs passed function"
 
         def stuff():
             return -2
 
-        self.assertEqual(optfunc.main(stuff, []), -2)
+        self.assertEqual(optfork.main(stuff, []), -2)
 
-    # I have no idea how to force the condition in optfunc.main
+    # I have no idea how to force the condition in optfork.main
     # into thinking it's a frame down from main.
     #
     # def test_as_runner(self):
-    #     "optfunc.main runs the function"
+    #     "optfork.main runs the function"
     # 
     #     def func():
     #         return 34
     # 
-    #     self.assertEqual(optfunc.main(func, []), 34)
+    #     self.assertEqual(optfork.main(func, []), 34)
 
 if __name__ == '__main__':
     unittest.main()
