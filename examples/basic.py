@@ -19,11 +19,10 @@ class Help(rf.Help):
     verbose = rf.Flag("Multiply verbosely.", opt='v')
 
 def main(value, factor=2.0, random=sys.stdin, verbose=False):
+    newval = value * factor
     if verbose:
-        print "value: %d" % value
-    newval = value * 2
-    if verbose:
-        print "%d * 2 = %d" % (value, newval)
-    print newval
+        print "%d * %s = %s" % (value, factor, newval)
+    else:
+        print newval
 
 rf.run(main, Help())

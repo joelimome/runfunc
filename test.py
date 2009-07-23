@@ -5,18 +5,29 @@ import sys
 import unittest
 from StringIO import StringIO
 
-os.putenv("OPTFUNC_RAISE", "TRUE")
+import runfunc as rf
 
-import optfork
 
+class ProgNameTest(unittest.TestCase):
+    def setUp(self):
+        self.oldargv = sys.argv
+    def tearDown(self):
+        sys.argv = self.oldargv
+
+    def test_success(self):
+        self.assertEqual(rf.progname(), os.path.basename(sys.argv[0]))
+        sys.argv = ['foo/bar']
+        self.assertEqual(rf.progname(), "bar")
+    
+    def test_fail(self):
+        sys.argv = []
+        self.assertRaises(RuntimeError, rf.progname)
 
 class StreamDup(object):
     def __init__(self, stream):
         self.stream = stream
-        if isinstance(self.stream, StreamDup):
-            self.stream = self.stream.stream
         self.dupped = StringIO()
-        self.silent = False
+        self.silent = True
     def __getattr__(self, name):
         if callable(getattr(self.stream, name)):
             def dup(*args, **kwargs):
@@ -33,604 +44,455 @@ class StreamDup(object):
         return self.dupped.getvalue()
 
 class BaseTest(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        super(BaseTest, self).__init__(*args, **kwargs)
+        self.stdout, self.stderr = sys.stdout, sys.stderr
+    
     def setUp(self):
-        sys.stdin = StreamDup(sys.stdin)
         sys.stdout = StreamDup(sys.stdout)
         sys.stderr = StreamDup(sys.stderr)
-
-class OptforkProgNameTest(unittest.TestCase):
-    def test_success(self):
-        self.assertEqual(optfork.progname(), os.path.split(sys.argv[0])[-1])
     
-    def test_fail(self):
-        oldargv = sys.argv
-        sys.argv = []
-        self.assertEqual(optfork.progname(), 'unknown_program')
-        sys.argv = oldargv
-
-class OptforkParserTest(BaseTest):
-    def test_required_args(self):
-        "Required arguments are parsed correctly"
-
-        def func(one, two, three):
-            pass
-
-        parser = optfork.OptforkParser(func)
+    def tearDown(self):
+        sys.stdout = self.stdout
+        sys.stderr = self.stderr
         
-        self.assertEqual(len(parser.option_list), 1)
-        self.assertEqual(str(parser.option_list[0]), '-h/--help')
-        self.assertEqual(parser.required, ["one", "two", "three"])
-        
-    def test_kwargs(self):
-        "Keyword args are made into options"
-
-        def func(one="foo", two=True):
-            pass
-
-        parser = optfork.OptforkParser(func)
-
-        self.assertEqual(len(parser.option_list), 3)
-        self.assertEqual(len(parser.required), 0)
-        self.assertEqual(str(parser.option_list[0]), '-h/--help')
-        
-        self.assertEqual(str(parser.option_list[1]), '-o/--one')
-        self.assertEqual(parser.option_list[1].default, 'foo')
-        self.assertEqual(parser.option_list[1].action, 'callback')
-        self.assertEqual(parser.option_list[1].callback, parser.validate)
-
-        self.assertEqual(str(parser.option_list[2]), '-t/--two')
-        self.assertEqual(parser.option_list[2].default, True)
-        self.assertEqual(parser.option_list[2].action, 'store_true')
-
-    def test_short_names(self):
-        "Repeated short names are resolved"
-
-        def check_parsed(expect, opts):
-            for opt in opts:
-                self.assertEqual(str(opt) in expect, True)
-                expect.remove(str(opt))
-            self.assertEqual(len(expect), 0)            
-        
-        def func1(one, version='', verbose=False):
-            pass
-        
-        parser = optfork.OptforkParser(func1)
-        expect = ['-h/--help', '-v/--version', '-e/--verbose']
-        check_parsed(expect, parser.option_list)
-            
-        def func2(one, host=''):
-            pass
-        
-        parser = optfork.OptforkParser(func2)
-        expect = ['-h/--help', '-o/--host']
-        check_parsed(expect, parser.option_list)
-
-    def test_custom_short_name(self):
-        "Custom short names"
-        
-        def func(b_far=3):
-            pass
-        
-        parser = optfork.OptforkParser(func)
-        
-        self.assertEqual(len(parser.option_list), 2)
-        self.assertEqual(str(parser.option_list[1]), '-b/--far')
-
-    def test_optfork_replaces_underscores(self):
-        "Replace underscores with hyphens"
-        
-        def func(something_here=2):
-            pass
-        
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(len(parser.option_list), 2)
-        self.assertEqual(str(parser.option_list[1]), '-s/--something-here')
-
-    def test_optfork_parses_methods(self):
-        "Object methods are handled correctly"
-        
-        class Foo(object):
-            def method(self, foo, baz="bing!"):
-                pass
-        
-        parser = optfork.OptforkParser(Foo().method)
-        self.assertEqual(len(parser.option_list), 2)
-        self.assertEqual(str(parser.option_list[1]), '-b/--baz')
-        self.assertEqual(parser.required, ["foo"])
-
-    def test_optfork_parses_lambda(self):
-        "Lambdas are handled correctly"
-        
-        # Not at all sure on a use case, but OptforkParse handles
-        # it with zero extra code.
-
-        parser = optfork.OptforkParser(lambda x: x.doh())
-        self.assertEqual(len(parser.option_list), 1)
-        self.assertEqual(parser.required, ["x"])
-    
-    def test_optfork_parses_callable_objects(self):
-        "Callable objects aren't directly kosher"
-        
-        class Foo(object):
-            def __call__(self, args, data=4):
-                pass
-        
-        # OptforkParser uses inspect.getargspec which doesn't do
-        # magic to check for a __call__ method. Although, callable
-        # objects *are* handled by the run methods.
-        
-        self.assertRaises(TypeError, optfork.OptforkParser, Foo())
-
-    def test_option_decorator(self):
-        "@option('foo', **kwargs) affects the Option instance"
-
-        @optfork.option('foo', help='help about foo')
-        def func(foo=False):
-            pass
-
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(parser.option_list[1].help, 'help about foo')
-
-        @optfork.option('foo', type='int')
-        def func(foo=2):
-            return foo
-        
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(parser.option_list[1].type, 'int')
-
-class OptforkRunTest(BaseTest):
-    def test_bad_args(self):
-        "Check that an invalid arguments object is bad."
-        
-        def func(a):
-            pass
-        
-        self.assertRaises(TypeError, optfork.run, func, "zooom!")
-
-    def test_args(self):
-        "Check running the basics"
-
-        def func(a, b=2, d=False):
-            if d: return int(b)*3 + int(a)
-            return -1
-
-        self.assertEqual(optfork.run(func, ["1", "-b", "3", "-d"]), 10)
-        self.assertEqual(optfork.run(func, ["1"]), -1)
-        self.assertEqual(optfork.run(func, ["1", "-d"]), 7)
-    
-    def test_missing_required(self):
-        "Throws an error for missing arguments"
-
-        def func(a, b):
-            pass
-        
-        self.assertRaises(SystemExit, optfork.run, func, [])
-        self.assertRaises(SystemExit, optfork.run, func, ['2'])
-    
-    def test_too_many_args(self):
-        "Throws an error for too many arguments"
-        
-        def func(a):
-            pass
-        
-        test = lambda: optfork.run(func, ['2', '3'])
-        self.assertRaises(SystemExit, test)
-
-    def test_custom_short_name(self):
-        "Custom short names"
-
-        def func(b_far=3):
-            return b_far
-
-        self.assertEqual(optfork.run(func, ['-b', 10]), 10)
-
-    def test_notstrict(self):
-        "@notstrict fills missing args with None"
-        
-        @optfork.notstrict
-        def func(a, b):
-            return [a, b]
-        
-        self.assertEqual(optfork.run(func, ['foo']), ['foo', None])
-
-    def test_notstrict_too_many(self):
-        "Even with @notstrict too many args is an error"
-        
-        @optfork.notstrict
-        def func(a):
-            pass
-    
-        test = lambda: optfork.run(func, ['foo', 'bar'])
-        self.assertRaises(SystemExit, test)
-
-
-class OptforkBasicValidatorTest(BaseTest):
-    def test_arg_validator(self):
-        "@valid checks required arguments"
-
-        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
-        def func(foo):
-            return foo
-
-        parser = optfork.OptforkParser(func)
-        self.assertEqual(parser.validators["foo"][0].im_self.func, int)
-        self.assertEqual(optfork.run(func, ["1"]), 1)
-        self.assertRaises(SystemExit, optfork.run, func, ["wheee"])
-
-    def test_opt_validator(self):
-        "@valid checks option arguments"
-
-        @optfork.valid(int, 'foo', help="%(name)s must be an integer.")
-        def func(foo=None):
-            return foo
-
-        parser = optfork.OptforkParser(func)
-        self.assertEqual("foo" in parser.validators, True)
-        self.assertEqual(optfork.run(func, []), None)
-        self.assertEqual(optfork.run(func, ["-f", "10"]), 10)
-        self.assertRaises(SystemExit, optfork.run, func, ["zippy"])
-
-    def test_multi_validations(self):
-        "@valid checks all named parameters."
-
-        @optfork.valid(int, "foo", "bar")
-        def func(foo, bar=None):
-            return foo, bar
-
-        valid = [
-            (["-b", "4", "1"], (1, 4)),
-            (["2"], (2, None))
-        ]
-        for pair in valid:
-            self.assertEqual(optfork.run(func, pair[0]), pair[1])
-
-        invalid = [
-            ["-b", "c", "1"],
-            ["z"],
-            ["-b", "5", "t"],
-            ["1", "-b", "foo"]
-        ]
-        for args in invalid:
-            sys.stderr.silence()
-            self.assertRaises(SystemExit, optfork.run, func, args)
-            sys.stderr.unsilence()
-
-    def test_auto_validate(self):
-        "Validators are picked up from the default value's type."
-        
-        def func(bar=1, foo="three", baz=2.0):
-            return bar, foo, baz
-        
-        parser = optfork.OptforkParser(func)
-        for name in "bar foo baz".split():
-            self.assertEqual(name in parser.validators, True)
-        args = ["-b", "2", "--foo=four", "-a", "3.1415"]
-        expect = (2, "four", 3.1415)
-        self.assertEqual(optfork.run(func, args), expect)
-    
-    def test_list_append(self):
-        "List default values make command line arguments accumulate"
-        
-        def func(foo=[]):
-            return foo
-        
-        args = ["-f", "0", "--foo=3", "--fo", "baz"]
-        self.assertEqual(optfork.run(func, args), ["0", "3", "baz"])
-
-        # monkey punch error condition
-        @optfork.option("foo", default=1)
-        def func(foo=[]):
-            return foo
-
-        self.assertEqual(optfork.run(func, args), [1, "0", "3", "baz"])
-
-class OptforkChoicesTest(BaseTest):
-    def test_basic(self):
-        "@choices limits to the available strings"
-        
-        @optfork.choices(["a", "b"], "bar")
-        def func(bar):
-            return bar
-        
-        self.assertEqual(optfork.run(func, ["a"]), "a")
-        self.assertEqual(optfork.run(func, ["b"]), "b")
-        self.assertRaises(SystemExit, optfork.run, func, ["c"])
-
-    def test_auto_validate(self):
-        "@choices with input validation works"
-        
-        @optfork.choices([1, 2], "baz", validator=int)
-        def func(baz):
-            return baz
-        
-        self.assertEqual(optfork.run(func, ["1"]), 1)
-        self.assertRaises(SystemExit, optfork.run, func, ["4"])
-        self.assertRaises(SystemExit, optfork.run, func, ["c"])
-
-class OptforkRegexpTest(BaseTest):
-    def test_basic(self):
-        "@regexp limits to matching strings"
-        
-        @optfork.regexp(r"biz|baz", "baz")
-        def func(baz):
-            return "nibbly"
-        
-        self.assertEqual(optfork.run(func, ["biz"]), "nibbly")
-        self.assertEqual(optfork.run(func, ["baz"]), "nibbly")
-        # Its a call to match() so only the prefix needs to match.
-        self.assertEqual(optfork.run(func, ["bazzingle"]), "nibbly")
-        
-        self.assertRaises(SystemExit, optfork.run, func, ["0"])
-
-class OptforkStreamTest(BaseTest):
+class ArgTest(BaseTest):
     def setUp(self):
-        self.path = os.path.dirname(__file__)
+        super(ArgTest, self).setUp()
+        self.parser = op.OptionParser()
+        arg = self.arg()
+        arg.name = 'foo'
+        self.parser.add_option(arg.as_opt(None))
 
-    def test_file(self):
-        "@stream will detect file names"
-        
-        @optfork.stream(optfork.FILE, "stream")
-        def func(stream):
-            return stream
-        
-        self.assertEqual(optfork.run(func, [__file__]), __file__)
-        self.assertRaises(SystemExit, optfork.run, func, ["/a/dir/path/"])
 
-    def test_dir(self):
-        "@stream will detect directory names"
-        
-        @optfork.stream(optfork.DIR, "stream")
-        def func(stream):
-            return stream
-        
-        self.assertEqual(optfork.run(func, ["/a/dir/path/"]), "/a/dir/path/")
-        self.assertRaises(SystemExit, optfork.run, func, [__file__])
-
-    def test_exists(self):
-        "@stream will detect existing paths"
-        
-        @optfork.stream(optfork.EXISTS, "stream")
-        def func(stream):
-            return stream
-        
-        self.assertEqual(optfork.run(func, [__file__]), __file__)
-        self.assertEqual(optfork.run(func, [self.path]), self.path)
-        self.assertRaises(SystemExit, optfork.run, func, ["/not/a/path"])
-
-    def test_parent(self):
-        "@stream will detect path parents."
-        
-        @optfork.stream(optfork.EXISTS, "stream")
-        def func(stream):
-            return stream
-        
-        self.assertEqual(optfork.run(func, [__file__]), __file__)
-        self.assertEqual(optfork.run(func, [self.path]), self.path)
-        newpath = os.path.join(self.path, "foo", "bar", "baz")
-        self.assertRaises(SystemExit, optfork.run, func, [newpath])
-
-    def test_open_r(self):
-        "@stream will open a file for reading"
-        
-        @optfork.stream(optfork.FILE, "stream", mode="r")
-        def func(stream):
-            return stream.mode
-            
-        self.assertEqual(optfork.run(func, [__file__]), "r")
-        self.assertRaises(SystemExit, optfork.run, func, [self.path])
-        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/nowhere"])
-
-    def test_open_w(self):
-        "@stream will open a file for writing"
-        
-        @optfork.stream(optfork.PARENT, "stream", mode="w+")
-        def func(stream):
-            ret = stream.tell(), stream.mode
-            stream.write("foo")
-            stream.close()
-            return ret
-        
-        tmpfile = os.path.join(self.path, "writer-test.txt")
-        self.assertEqual(optfork.run(func, [tmpfile]), (0, "w+"))
-        self.assertEqual(optfork.run(func, [tmpfile]), (0, "w+"))
-        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/none"])
-        os.remove(tmpfile)
-
-    def test_open_wplusb(self):
-        "@stream will open a file for reading and writing"
-        
-        @optfork.stream(optfork.PARENT, "stream", mode="w+b")
-        def func(stream):
-            stream.write("foo")
-            stream.seek(0)
-            stream.read(2)
-            return stream.tell(), stream.mode
-        
-        tmpfile = os.path.join(self.path, "reader-writer-test.txt")
-        self.assertEqual(optfork.run(func, [tmpfile]), (2, "w+b"))
-        self.assertEqual(optfork.run(func, [tmpfile]), (2, "w+b"))
-        self.assertRaises(SystemExit, optfork.run, func, ["/path/to/none"])
-        os.remove(tmpfile)
-
-    def test_stdin(self):
-        "stdin, stdout, stderr as argument names gets passed sys.* streams"
-
-        def func(stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr):
-            self.assertEqual(stdin, sys.stdin)
-            self.assertEqual(stdout, sys.stdout)
-            self.assertEqual(stderr, sys.stderr)
-            return "awesome!"
-
-        self.assertEqual(optfork.run(func, []), 'awesome!')
-
-class OptforkClassTest(BaseTest):
-    def test_run_class(self):
-        "Running a class executes it's init method."
-
-        class InitClass:
-            def __init__(self, one, option=''):
-                self.vals = (one, option)
-
-        test = lambda: optfork.run(InitClass, ['f', '-o', 'z'])
-        self.assertEqual(test().vals, ('f', 'z'))
-
-    def test_no_init_is_error(self):
-        "No __init__ method on a class throws an error."
-        
-        # I can't figure out how this would be useful. Calling it an
-        # an error until someone shows me different.
-
-        class NoInitClass:
-            pass
-        
-        self.assertRaises(TypeError, optfork.run, NoInitClass, [])
-
-    def test_runs_callable_instance(self):
-        "Instances of callable classes are ok."
-
-        class CallableClass(object):
-            def __init__(self):
-                pass
-            def __call__(self, arg, opt=2):
-                return arg + str(opt)
-
-        self.assertEqual(optfork.run(CallableClass(), ['f', '-o', '3']), 'f3')
-
-    def test_ridiculous_error(self):
-        "Ridiculous error to force checked condition"
-        class HidesCallable(object):
-            def __init__(self):
-                self.found = 0
-            def __call__(self):
-                pass
-            def __getattribute__(self, name):
-                if name == '__call__' and self.found > 1:
-                    raise AttributeError("I am hiding")
-                self.found += 1
-                return super(HidesCallable, self).__getattribute__(self, name)
-        
-        test = lambda: optfork.run(HidesCallable(), [])
-        self.assertRaises(TypeError, test)
-
-class OptforkCommandsTest(BaseTest):
-    def test_basics(self):
-        "Executes subcommands successfully"
+class NoImplArg(ArgTest):
+    def arg(self):
+        return rf.Arg("foo")
     
-        def one(arg):
-            return "One " + str(arg)
-        def two(arg, some='stuff'):
-            return "Two " + str(arg) + ' ' + some
-        def three(arg):
-            return "Three " + str(arg)
-            
-        test = lambda x: optfork.run([one, two, three], x)
-        self.assertEqual(test(['two', '2']), 'Two 2 stuff')
-        self.assertEqual(test(['three', '5']), 'Three 5')
-        
-    def test_no_args(self):
-        "No args prints the command list"
-        
-        def one(arg):
-            pass
-        def two(arg):
-            pass
+    def test_needs_implementation(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', ''])
 
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence()
-        self.assertEqual(optfork.run([one, two], []), 0)
-        sys.stderr.unsilence()
-        self.assertNotEqual(sys.stderr.getvalue(), "")
+class CheckTest(ArgTest):
+    def arg(self):
+        return rf.Check(int, "This is foo.")
 
-    def test_invalid_command(self):
-        "Invalid command is an error and prints help"
-        
-        def one(arg):
-            pass
-        def two(arg):
-            pass
-        
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence() # Quiet output
-        self.assertEqual(optfork.run([one, two], ['three']), -1)
-        sys.stderr.unsilence()
-        self.assertNotEqual(sys.stderr.getvalue(), "")
+    def test_no_validation(self):
+        opts, args = self.parser.parse_args([])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, None)
+
+    def test_validates(self):
+        opts, args = self.parser.parse_args(['--foo', '2'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, 2)
     
-    def test_help_prints_help(self):
-        "Default help command prints a command list"
-        
-        def one(arg):
-            pass
-        def two(arg):
-            pass
-        
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence()
-        self.assertEqual(optfork.run([one, two], ['help']), 0)
-        sys.stderr.unsilence()
-        self.assertNotEqual(sys.stderr.getvalue(), "")
+    def test_validation_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', 'bar'])
+
+class HidesUnexpectedError(ArgTest):
+    def arg(self):
+        class BadArg(rf.Arg):
+            def validate(self, option, optstr, value, parser):
+                raise ValueError()
+        return BadArg("stuff")
+
+    def test_hides_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', '2'])
     
-    def test_cmd(self):
-        "@desc describes a command in list output"
-        
-        @optfork.cmd("Captain commando!")
-        def one(arg):
-            pass
-        
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence()
-        self.assertEqual(optfork.run([one], ['help']), 0)
-        sys.stderr.unsilence()
-        self.assertNotEqual(sys.stderr.getvalue(), "")
-        self.assertEqual("commando!" in sys.stderr.getvalue(), True)
+class FlagTest(ArgTest):
+    def arg(self):
+        return rf.Flag("Another step.", opt='f')
     
-    def test_help_with_args(self):
-        "Help with commands prints some help"
-        
-        def one(arg):
-            "Some stuff"
-            pass
-        def two(arg):
-            pass
-        
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence()
-        self.assertEqual(optfork.run([one, two], ['help', 'one', 'three']), 0)
-        sys.stderr.unsilence()
-        self.assertNotEqual(sys.stderr.getvalue(), "")
+    def test_validate_long(self):
+        opts, args = self.parser.parse_args(['--foo', '2'])
+        self.assertEqual(args, ['2'])
+        self.assertEqual(opts.foo, True)
+
+    def test_validate_short(self):
+        opts, args = self.parser.parse_args(['-f', '2'])
+        self.assertEqual(args, ['2'])
+        self.assertEqual(opts.foo, True)
+
+class ListTest(ArgTest):
+    def arg(self):
+        return rf.List("Some stuff", opt='f')
     
-    def test_help_as_command(self):
-        "If a command is named 'help' it is run"
-        
-        def one(arg):
-            pass
-        def help(arg):
-            return arg + ' bar'
-        
-        self.assertEqual(sys.stderr.getvalue(), "")
-        sys.stderr.silence()
-        self.assertEqual(optfork.run([one, help], ['help', 'foo']), 'foo bar')
+    def test_validates_once(self):
+        opts, args = self.parser.parse_args(['-f', '1'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, ['1'])
+
+    def test_revalidates(self):
+        opts, args = self.parser.parse_args(['-f', '1', '-f', '2'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, ['1', '2'])
+
+class ListValidateTest(ArgTest):
+    def arg(self):
+        return rf.List("Some stuff", opt='f', validator=int)
+    
+    def test_validate_add(self):
+        opts, args = self.parser.parse_args(['-f', '1'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, [1])
+    
+    def test_revalidates_add(self):
+        opts, args = self.parser.parse_args(['-f', '1', '-f', '2'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, [1, 2])
+    
+    def test_validation_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['-f', 'bar'])
+
+class ChoiceTest(ArgTest):
+    def arg(self):
+        return rf.Choice(["bar"], "yay")
+    
+    def test_validate(self):
         sys.stderr.unsilence()
-        self.assertEqual(sys.stderr.getvalue(), "")
+        opts, args = self.parser.parse_args(['--foo', 'bar'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, 'bar')
+    
+    def test_validation_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', 'baz'])
+    
+class ChoiceValidationTest(ArgTest):
+    def arg(self):
+        return rf.Choice([1, 2, 3], "stuff", validator=int, opt='f')
+    
+    def test_validate(self):
+        opts, args = self.parser.parse_args(['-f', '1'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, 1)
+    
+    def test_validation_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['-f', '5'])
+    
+    def test_validator_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['-f', 'bar'])
 
-class OptforkMainTest(BaseTest):
-    def test_run_func(self):
-        "optfork.main runs passed function"
+class RegexpTest(ArgTest):
+    def arg(self):
+        return rf.Regexp('\w{3}', "TLA!", opt='r')
+    
+    def test_validate(self):
+        opts, args = self.parser.parse_args(['-r', 'TLA'])
+        self.assertEqual(args, [])
+        self.assertEqual(opts.foo, 'TLA')
+    
+    def test_validation_error(self):
+        self.assertRaises(SystemExit, self.parser.parse_args, ['-r', '#'])
+    
+class EmailTest(ArgTest):
+    def arg(self):
+        return rf.Email("yep.")
+    
+    def test_validate(self):
+        cases = [
+            "person@foo.com",
+            "some.one@people.org",
+            "an-example_of@this.is.where.we.go.uk"
+        ]
+        for cs in cases:
+            opts, args = self.parser.parse_args(['--foo', cs])
+            self.assertEqual(args, [])
+            self.assertEqual(opts.foo, cs)
 
-        def stuff():
-            return -2
+    def test_validation_error(self):
+        cases = [
+            "@company.com",
+            "me@my.homestead",
+            "invalid",
+            "$their@gone.com"
+        ]
+        for cs in cases:
+            self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', cs])
 
-        self.assertEqual(optfork.main(stuff, []), -2)
+class IpAddrTest(ArgTest):
+    def arg(self):
+        return rf.IpAddr("uhuh")
+    
+    def test_validate(self):
+        cases = [
+            '127.0.0.1',
+            '243.109.3.1',
+            '1.201.30.254'
+        ]
+        for cs in cases:
+            opts, args = self.parser.parse_args(['--foo', cs])
+            self.assertEqual(args, [])
+            self.assertEqual(opts.foo, cs)
+        
+    def test_vaidation_error(self):
+        cases = [
+            'not.an.ip.address',
+            '127.0.0.256'
+            'stuff'
+        ]
+        for cs in cases:
+            self.assertRaises(SystemExit, self.parser.parse_args, ['--foo', cs])
 
-    # I have no idea how to force the condition in optfork.main
-    # into thinking it's a frame down from main.
-    #
-    # def test_as_runner(self):
-    #     "optfork.main runs the function"
-    # 
-    #     def func():
-    #         return 34
-    # 
-    #     self.assertEqual(optfork.main(func, []), 34)
+class PathTest(ArgTest):
+    def arg(self):
+        self.arg = rf.Path(0, "path stuff", opt='f')
+        return self.arg
+    
+    def test_validate(self):
+        cases = [
+            (rf.FILE, __file__),
+            (rf.DIR, os.path.dirname(__file__) + "/"),
+            (rf.EXISTS, __file__),
+            (rf.PARENT, __file__),
+            (rf.FILE | rf.EXISTS, __file__),
+            (rf.DIR | rf.PARENT, os.path.dirname(__file__) + "/")
+        ]
+        for cs in cases:
+            self.arg.flags = cs[0]
+            opts, args = self.parser.parse_args(['-f', cs[1]])
+            self.assertEqual(args, [])
+            self.assertEqual(opts.foo, cs[1])
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_validation_error(self):
+        cases = [
+            (rf.FILE, os.path.dirname(__file__) + "/"),
+            (rf.DIR, __file__),
+            (rf.EXISTS, os.path.join(__file__, "bar")),
+            (rf.PARENT, os.path.join(__file__, "baz", "bar")),
+        ]
+        for cs in cases:
+            self.arg.flags = cs[0]
+            self.assertRaises(SystemExit, self.parser.parse_args, ['-f', cs[1]])
+        
+class StreamTest(ArgTest):
+    def arg(self):
+        self.path = os.path.join(os.path.dirname(__file__), "foo.txt")
+        self.arg = rf.Stream("r", "stream", opt='f')
+        return self.arg
+    
+    def tearDown(self):
+        if os.path.exists(self.path):
+            os.remove(self.path)
+        super(StreamTest, self).tearDown()
+    
+    def test_validate(self):
+        cases = ["w", "a", "r+", "r"]
+        for cs in cases:
+            self.arg.mode = cs
+            opts, args = self.parser.parse_args(['-f', self.path])
+            self.assertEqual(args, [])
+            self.assertEqual(opts.foo.__class__, file)
+
+    def test_validation_error(self):
+        self.arg.mode = "r"
+        self.assertRaises(SystemExit, self.parser.parse_args, ['-r', self.path])
+
+class HelpTest(unittest.TestCase):
+    def test_basic(self):
+        class Help(rf.Help):
+            foo = rf.Check(int, "This is an option.")
+        h = Help()
+        self.assertEqual(hasattr(h, "_args"), True)
+        self.assertEqual("foo" in h, True)
+        self.assertEqual(h["foo"].name, "foo")
+        self.assertEqual(h["foo"].desc, "This is an option.")
+
+class HelpInherit(BaseTest):
+    def test_basic(self):
+        class BaseHelp(rf.Help):
+            foo = rf.Check(int, "Option 1")
+        class Help(BaseHelp):
+            foo = rf.Flag("Second option 1")
+            bar = rf.Regexp('two', "Another")
+        h = Help()
+        self.assertEqual(hasattr(h, "_args"), True)
+        for name in ["foo", "bar"]:
+            self.assertEqual(name in h, True)
+            self.assertEqual(h[name].name, name)
+        self.assertEqual(h["foo"].desc, "Second option 1")
+        self.assertEqual(h["bar"].desc, "Another")
+
+class ParserBasicTests(BaseTest):
+    def setUp(self):
+        super(ParserBasicTests, self).setUp()
+        class Help(rf.Help):
+            "Stuff"
+            foo = rf.Check(int, "Foo option")
+        self.help = Help
+
+    def test_no_help(self):
+        def func(bar):
+            pass
+        self.assertRaises(RuntimeError, rf.Parser, func, self.help())
+    
+    def test_options(self):
+        def func(foo=4):
+            pass
+        parser = rf.Parser(func, self.help())
+        self.assertEqual(parser.description, "Stuff")
+        self.assertEqual(len(parser.option_list), 2)
+        self.assertEqual(str(parser.option_list[0]), "-h/--help")
+        self.assertEqual(str(parser.option_list[1]), "--foo")
+        self.assertEqual(parser.option_list[1].default, 4)
+        self.assertEqual(parser.parse(['--foo', '2']), {'foo': 2})
+
+    def test_required(self):
+        def func(foo):
+            pass
+        parser = rf.Parser(func, self.help())
+        self.assertEqual(len(parser.option_list), 1)
+        self.assertEqual(str(parser.option_list[0]), "-h/--help")
+        self.assertEqual("foo" in parser.required, True)
+        self.assertEqual(parser.parse(['3']), {"foo": 3})
+
+    def test_parse(self):
+        def func(foo=None):
+            pass
+        parser = rf.Parser(func, self.help())
+        cases = [
+            ([], {"foo": None}),
+            (['--foo', '2'], {'foo': 2}),
+            (['--foo', '3', '--foo', '5'], {'foo': 5})
+        ]
+        for cs in cases:
+            self.assertEqual(parser.parse(cs[0]), cs[1])
+
+    def test_missing(self):
+        def func(foo):
+            pass
+        parser = rf.Parser(func, self.help())
+        self.assertRaises(SystemExit, parser.parse, [])
+    
+    def test_extra(self):
+        def func(foo):
+            pass
+        parser = rf.Parser(func, self.help())
+        self.assertRaises(SystemExit, parser.parse, ['2', '3'])
+
+    def test_wrap_exception(self):
+        def throw(bar):
+            raise TypeError(bar)
+        class Help(rf.Help):
+            bar = rf.Check(throw, "bang!")
+        parser = rf.Parser(throw, Help())
+        self.assertRaises(SystemExit, parser.parse, ["foo"])
+
+class RunTest(BaseTest):
+    def setUp(self):
+        super(RunTest, self).setUp()
+        class Help(rf.Help):
+            "Stuff"
+            foo = rf.Check(int, "Foo option")
+            bar = rf.Flag("Stuff", opt='b')
+        self.help = Help
+
+    def test_basic(self):
+        def func(bar=False):
+            return bar
+        cases = [([], False), (['-b'], True)]
+        for cs in cases:
+            ret = rf.run(func, self.help(), argv=cs[0], check=False)
+            self.assertEqual(ret, cs[1])
+
+    def test_lambda(self):
+        func = lambda foo, bar=False: (foo, bar)
+        cases = [
+            (['2'], (2, False)),
+            (['-b', '3'], (3, True)),
+            (['4', '--bar'], (4, True))
+        ]
+        for cs in cases:
+            ret = rf.run(func, self.help(), argv=cs[0], check=False)
+            self.assertEqual(ret, cs[1])
+
+    def test_class(self):
+        class Func(object):
+            def __init__(self, foo, bar=None):
+                self.data = (foo, bar)
+        cases = [
+            (['2'], (2, None)),
+            (['-b', '3'], (3, True)),
+            (['4', '--bar'], (4, True))
+        ]
+        for cs in cases:
+            ret = rf.run(Func, self.help(), argv=cs[0], check=False)
+            self.assertEqual(ret.data, cs[1])
+
+    def test_old_class(self):
+        class Func:
+            pass
+        self.assertRaises(TypeError, rf.run, Func, self.help(), check=False)
+
+    def test_callable_object(self):
+        class Func(object):
+            def __call__(self, foo, bar=None):
+                return (foo, bar)
+        cases = [
+            (['2'], (2, None)),
+            (['-b', '3'], (3, True)),
+            (['4', '--bar'], (4, True))
+        ]
+        for cs in cases:
+            ret = rf.run(Func(), self.help(), argv=cs[0], check=False)
+            self.assertEqual(ret, cs[1])
+
+    def test_not_callable(self):
+        class Func(object):
+            pass
+        self.assertRaises(TypeError, rf.run, Func(), self.help(), check=False)
+
+    def test_bad_argv(self):
+        def func(foo):
+            pass
+        self.assertRaises(
+            TypeError, rf.run, func, self.help(), argv=1, check=False
+        )
+
+class IsMainTest(unittest.TestCase):
+    def test_basic(self):
+        self.assertEqual(rf.is_main(), False)
+
+    def test_no_run(self):
+        class Help(rf.Help):
+            pass
+        def func():
+            return 10
+        self.assertEqual(rf.run(func, Help()), None)
+
+class FormatterTest(BaseTest):
+    def setUp(self):
+        super(FormatterTest, self).setUp()
+        class Help(rf.Help):
+            """\
+            Indent
+                Stuff
+            """
+            foo = rf.Check(int, "Stuff", opt='f')
+            bar = rf.Regexp('\w{3}', "Hi")
+        self.help = Help
+
+    def test_description(self):
+        def func(foo, bar):
+            pass
+        parser = rf.Parser(func, self.help())
+        desc = parser.formatter.format_description(parser.description)
+        self.assertEqual(desc, "Indent\n    Stuff\n")
+    
+    def test_no_desc(self):
+        class Help(rf.Help):
+            pass
+        def func():
+            pass
+        parser = rf.Parser(func, Help())
+        parser.print_help()
+        self.assertEqual(sys.stdout.getvalue().startswith("Options:"), True)
+    
+    def test_format_option(self):
+        def func(foo):
+            pass
+        parser = rf.Parser(func, self.help())
+        opt = parser.help['foo'].as_opt(None)
+        ret = parser.formatter.format_option_strings(opt)
+        self.assertEqual(ret, "-f/--foo FOO")
+        
+        
