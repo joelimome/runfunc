@@ -1,4 +1,10 @@
 #!/usr/bin/env python
+#
+# Copyright (c) 2009, Simon Willison
+# Copyright 2009 Paul J. Davis <paul.joseph.davis@gmail.com>
+#
+# This file is part of the run package released under the BSD license.
+#
 import sys
 import runfunc as rf
 
