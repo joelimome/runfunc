@@ -41,10 +41,10 @@ Help Class
 ==========
 
 The basic outline for using `runfunc` is to create a subclass of `runfunc.Help`
-and use provide this class when running the function. This subclass is
-responsible for specifying all of the possible arguments to be passed to the
-function. It can contain extra arguments that are ignored so that the same
-subclass can be reused for multiple command line scripts.
+and provide this class when running the function. This subclass is responsible
+for specifying all of the possible arguments to be passed to the function. It
+can contain extra arguments that are ignored so that the same subclass can be
+reused for multiple command line scripts.
 
     class Help(rf.Help):
         """\
@@ -77,6 +77,25 @@ Running a function
 * `help_object` is an instance of a class that inherits from `runfunc.Help`.
 * `argv` is a list of arguments. If None, `sys.argv[1:]` is used
 * `check=True` will prevent the function from running when imported as a module.
+
+
+Functions
+---------
+
+When you specify a function, the arguments will be treated as required values on
+the command line. Any keyword arguments will be able to be specified as options
+the the program. For instance:
+
+    def foo(bar, val=None):
+        pass
+
+Will have one required argument for `bar` and an option for `val`. Required
+arguments are taken in order of specification on the command line. If you use
+required arguments you should be sure to specify a helpful `usage` description
+on your Help class.
+
+All arguments to the function must be present as attributes on the
+`runfunc.Help` instance passed to `runfunc.run`.
 
 Validator Types
 ===============
